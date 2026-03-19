@@ -2,10 +2,16 @@
 
 A QGIS plugin that imports [WebODM](https://github.com/OpenDroneMap/WebODM) task output (ZIP) into QGIS, automatically detects assets, generates derived layers, and organises them into a named layer group.
 
+## Screenshots
+
+| Orthophoto | Terrain Model |
+|------------|---------------|
+| ![Orthophoto](docs/webodm_importer_orthophoto.png) | ![Terrain Model](docs/webodm_importer_terrain_model.png) |
+
 ## Features
 
 - **ZIP import**: Select a WebODM task ZIP — no manual extraction required
-- **Asset detection**: Automatically detects orthophoto, DSM, DTM, and point cloud (.laz)
+- **Asset detection**: Automatically detects orthophoto, DSM, DTM, and point cloud (EPT or .laz)
 - **Derived layers**: Generates CHM (DSM − DTM), vegetation index (VARI), hillshade, and composite surface/terrain models
 - **Composite models**: Surface Model (DSM + hillshade) and Terrain Model (DTM + hillshade) baked into single RGB GeoTIFFs
 - **Duplicate detection**: MD5 hash check prevents re-importing the same ZIP twice
@@ -18,7 +24,9 @@ A QGIS plugin that imports [WebODM](https://github.com/OpenDroneMap/WebODM) task
 ├── odm_orthophoto/odm_orthophoto.tif   ← extracted from ZIP
 ├── odm_dem/dsm.tif
 ├── odm_dem/dtm.tif
-├── odm_georeferencing/odm_georeferenced_model.laz
+├── odm_georeferencing/odm_georeferenced_model.laz  ← LAZ fallback
+├── entwine_pointcloud/ept.json                     ← EPT (preferred)
+├── entwine_pointcloud/ept-data/…
 ├── vegetation.tif                       ← generated
 ├── hillshade_dsm.tif
 ├── hillshade_dtm.tif
@@ -40,12 +48,12 @@ A QGIS plugin that imports [WebODM](https://github.com/OpenDroneMap/WebODM) task
 | DTM | Raw terrain elevation |
 | Hillshade (DTM) | Greyscale hillshade from DTM |
 | CHM | Canopy Height Model (DSM − DTM) |
-| Point Cloud | .laz point cloud (requires PDAL) |
+| Point Cloud | EPT point cloud (preferred); falls back to .laz via PDAL |
 
 ## Requirements
 
 - QGIS 3.16 or later
-- PDAL provider (for point cloud layers, bundled with QGIS 3.18+)
+- PDAL provider (for .laz fallback only; bundled with QGIS 3.18+)
 - WebODM task output ZIP
 
 ## Usage
@@ -62,7 +70,7 @@ To reload a previously imported dataset, use the **Load Existing** dropdown.
 
 - If the same ZIP (by content hash) has already been imported, re-import is blocked
 - Output folder name is auto-incremented (`_001`, `_002` …) if the name already exists
-- Point cloud layers require the QGIS PDAL provider; a warning is shown if unavailable
+- EPT point clouds are loaded directly; .laz fallback requires the QGIS PDAL provider
 
 ## Colour rendering
 
