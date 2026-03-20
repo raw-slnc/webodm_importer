@@ -70,7 +70,7 @@ Layer styles (elevation ramp, vegetation index, hillshade) are applied using gen
 
 ## Requirements
 
-- QGIS 3.16 or later
+- QGIS 3.18 or later
 - PDAL provider (for .laz fallback only; bundled with QGIS 3.18+)
 - WebODM task output ZIP
 

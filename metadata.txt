@@ -6,7 +6,7 @@
 
 [general]
 name=WebODM Importer
-qgisMinimumVersion=3.16
+qgisMinimumVersion=3.18
 description=Import WebODM task output into QGIS with automatic asset detection and layer generation.
 version=0.1.0
 author=Hideharu Masai
