@@ -2,8 +2,6 @@
 
 A QGIS plugin that imports [WebODM](https://github.com/OpenDroneMap/WebODM) task output (ZIP) into QGIS, automatically detects assets, generates derived layers, and organises them into a named layer group.
 
-## Screenshots
-
 | Orthophoto | Terrain Model |
 |------------|---------------|
 | ![Orthophoto](docs/webodm_importer_orthophoto.png) | ![Terrain Model](docs/webodm_importer_terrain_model.png) |
@@ -30,8 +28,8 @@ A QGIS plugin that imports [WebODM](https://github.com/OpenDroneMap/WebODM) task
 ├── vegetation.tif                       ← generated
 ├── hillshade_dsm.tif
 ├── hillshade_dtm.tif
-├── surface_model.tif                    ← DSM + hillshade composite
-├── terrain_model.tif                    ← DTM + hillshade composite
+├── surface_model.tif                    ← DSM + hillshade (from DSM) composite
+├── terrain_model.tif                    ← DTM + hillshade (from DTM) composite
 ├── chm.tif
 └── .import_meta.json                    ← hash record
 ```
@@ -50,16 +48,10 @@ A QGIS plugin that imports [WebODM](https://github.com/OpenDroneMap/WebODM) task
 | CHM | Canopy Height Model (DSM − DTM) |
 | Point Cloud | EPT point cloud (preferred); falls back to .laz via PDAL |
 
-## Requirements
-
-- QGIS 3.16 or later
-- PDAL provider (for .laz fallback only; bundled with QGIS 3.18+)
-- WebODM task output ZIP
-
 ## Usage
 
 1. Open the panel via **Raster → WebODM Importer**
-2. Click **🗜 ZIP** to select a WebODM task output ZIP
+2. Click **Select ZIP** to select a WebODM task output ZIP
 3. Check the detected assets and select which layers to generate
 4. Set the output name (defaults to the ZIP filename)
 5. Click **Run**
@@ -75,3 +67,23 @@ To reload a previously imported dataset, use the **Load Existing** dropdown.
 ## Colour rendering
 
 Layer styles (elevation ramp, vegetation index, hillshade) are applied using generic QGIS colour schemes and do not replicate the WebODM web interface display. Styles can be customised after import via the QGIS layer properties.
+
+## Requirements
+
+- QGIS 3.16 or later
+- PDAL provider (for .laz fallback only; bundled with QGIS 3.18+)
+- WebODM task output ZIP
+
+## License
+
+This plugin is distributed under the GNU General Public License v2 or later.
+See [LICENSE](LICENSE) for details.
+
+## Support
+
+If this plugin is helpful for your work, you can support the development here:
+https://paypal.me/rawslnc
+
+## Author
+
+(C) 2026 by Hideharu Masai

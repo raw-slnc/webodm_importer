@@ -14,7 +14,6 @@ from qgis.PyQt.QtWidgets import (
     QComboBox, QGroupBox,
 )
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QPainter
 from qgis.core import QgsPointCloudLayer, QgsRasterLayer, QgsProject
 
 from . import asset_detector, processor
@@ -45,6 +44,7 @@ class WebODMPanel(QDockWidget):
 
         self.setObjectName('WebODMImporterPanel')
         self.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
+        self.setMaximumHeight(620)
 
         root_widget = QWidget()
         self.setWidget(root_widget)
@@ -157,15 +157,23 @@ class WebODMPanel(QDockWidget):
         main.addWidget(grp)
 
         # ── Run ────────────────────────────────────
+        grp = QGroupBox('Run')
+        lay = QVBoxLayout(grp)
         self._btn_run = QPushButton('Run')
         self._btn_run.setEnabled(False)
         self._btn_run.clicked.connect(self._run)
-        main.addWidget(self._btn_run)
+        lay.addWidget(self._btn_run)
 
         self._lbl_run_status = QLabel()
         self._lbl_run_status.setWordWrap(True)
         self._lbl_run_status.setStyleSheet('font-size: 11px;')
-        main.addWidget(self._lbl_run_status)
+        lay.addWidget(self._lbl_run_status)
+        main.addWidget(grp)
+
+        lbl_credit = QLabel('Developed by Avid Tree Work')
+        lbl_credit.setStyleSheet(_note_style())
+        lbl_credit.setAlignment(Qt.AlignCenter)
+        main.addWidget(lbl_credit)
 
         main.addStretch()
 
@@ -246,14 +254,21 @@ class WebODMPanel(QDockWidget):
             QgsProject.instance().removeMapLayer(lid)
 
     def _refresh_existing_combo(self):
+        from qgis.PyQt.QtGui import QColor
+        from qgis.PyQt.QtCore import Qt
         self._combo_existing.clear()
         self._combo_existing.addItem('— select —')
         base = self._output_base()
         if not base or not os.path.isdir(base):
             return
+        root = QgsProject.instance().layerTreeRoot()
         for name in sorted(os.listdir(base)):
             if os.path.isdir(os.path.join(base, name)):
                 self._combo_existing.addItem(name)
+                if root.findGroup(name):
+                    idx = self._combo_existing.count() - 1
+                    self._combo_existing.model().item(idx).setEnabled(False)
+                    self._combo_existing.model().item(idx).setForeground(QColor('gray'))
 
     # ── Slots ────────────────────────────────────────
     def _select_source(self):
@@ -301,8 +316,9 @@ class WebODMPanel(QDockWidget):
         self._chk_chm.setChecked(can_chm)
         self._chk_chm.setText('CHM' if can_chm else 'CHM\n(DSM or DTM missing)')
 
-        self._chk_laz.setChecked('laz' in self._assets)
-        self._chk_laz.setEnabled('laz' in self._assets)
+        has_pc = 'ept' in self._assets or 'laz' in self._assets
+        self._chk_laz.setChecked(has_pc)
+        self._chk_laz.setEnabled(has_pc)
 
         base = self._output_base()
         if base:
@@ -349,8 +365,8 @@ class WebODMPanel(QDockWidget):
                 added.append('Vegetation')
 
         hs_dtm_path = os.path.join(folder, 'hillshade_dtm.tif')
-        comp_dsm_path = os.path.join(folder, 'composite_dsm.tif')
-        comp_dtm_path = os.path.join(folder, 'composite_dtm.tif')
+        comp_dsm_path = os.path.join(folder, 'surface_model.tif')
+        comp_dtm_path = os.path.join(folder, 'terrain_model.tif')
 
         # Surface Model (baked composite RGB)
         if 'dsm' in assets and os.path.isfile(comp_dsm_path):
@@ -475,8 +491,8 @@ class WebODMPanel(QDockWidget):
 
         hs_dsm_path = os.path.join(out_dir, 'hillshade_dsm.tif')
         hs_dtm_path = os.path.join(out_dir, 'hillshade_dtm.tif')
-        comp_dsm_path = os.path.join(out_dir, 'composite_dsm.tif')
-        comp_dtm_path = os.path.join(out_dir, 'composite_dtm.tif')
+        comp_dsm_path = os.path.join(out_dir, 'surface_model.tif')
+        comp_dtm_path = os.path.join(out_dir, 'terrain_model.tif')
 
         # Surface Model (baked composite RGB)
         if self._chk_dsm.isChecked() and 'dsm' in abs_assets:

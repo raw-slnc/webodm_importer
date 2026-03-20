@@ -28,7 +28,7 @@ tags=webodm,drone,photogrammetry,dem,dsm,dtm,chm,orthophoto,forestry
 
 homepage=https://github.com/raw-slnc/webodm_importer
 category=Raster
-icon=icons/icon.png
+icon=icon.png
 experimental=False
 deprecated=False
 server=False

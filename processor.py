@@ -7,7 +7,7 @@ import processing
 import numpy as np
 from osgeo import gdal
 from qgis.core import (
-    QgsRasterLayer, QgsProject,
+    QgsRasterLayer,
     QgsRasterShader, QgsColorRampShader,
     QgsSingleBandPseudoColorRenderer,
 )
@@ -61,25 +61,6 @@ def generate_hillshade(dtm_path: str, output_path: str) -> str:
     return output_path
 
 
-def apply_elevation_style(layer: QgsRasterLayer) -> None:
-    """Pseudo-color elevation ramp (rainbow/jet: violet → blue → cyan → green → yellow → red)."""
-    stats = layer.dataProvider().bandStatistics(1)
-    lo, hi = stats.minimumValue, stats.maximumValue
-
-    ramp = QgsColorRampShader(lo, hi)
-    ramp.setColorRampType(QgsColorRampShader.Interpolated)
-    ramp.setColorRampItemList([
-        QgsColorRampShader.ColorRampItem(lo + (hi - lo) * t, QColor(*c))
-        for t, c in _ELEV_RAMP
-    ])
-    shader = QgsRasterShader(lo, hi)
-    shader.setRasterShaderFunction(ramp)
-    renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader)
-    renderer.setClassificationMin(lo)
-    renderer.setClassificationMax(hi)
-    layer.setRenderer(renderer)
-    layer.triggerRepaint()
-
 
 def render_elevation_composite(elev_path: str, hs_path: str, output_path: str) -> str:
     """Bake elevation color ramp + hillshade (Multiply 70%) into a single RGB GeoTIFF."""
@@ -120,6 +101,7 @@ def render_elevation_composite(elev_path: str, hs_path: str, output_path: str) -
     ds_out.FlushCache()
     ds_out = ds_hs = ds_elev = None
     return output_path
+
 
 
 def apply_vegetation_style(layer: QgsRasterLayer) -> None:

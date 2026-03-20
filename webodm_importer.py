@@ -1,4 +1,6 @@
+import os
 from qgis.PyQt.QtWidgets import QAction
+from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtCore import Qt
 from .panel import WebODMPanel
 
@@ -10,7 +12,8 @@ class WebODMImporter:
         self.action = None
 
     def initGui(self):
-        self.action = QAction('WebODM Importer', self.iface.mainWindow())
+        icon = QIcon(os.path.join(os.path.dirname(__file__), 'icon.png'))
+        self.action = QAction(icon, 'WebODM Importer', self.iface.mainWindow())
         self.action.triggered.connect(self._toggle_panel)
         self.iface.addRasterToolBarIcon(self.action)
         self.iface.addPluginToRasterMenu('&WebODM Importer', self.action)
