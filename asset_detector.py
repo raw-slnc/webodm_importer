@@ -31,6 +31,16 @@ def detect(folder: str) -> dict:
         abs_path = os.path.join(folder, rel)
         if os.path.isfile(abs_path):
             found[key] = abs_path
+    # odm_georeferencing/ 内の個別 LAS ファイルも検出（VS Export形式）
+    if 'laz' not in found:
+        geo_dir = os.path.join(folder, 'odm_georeferencing')
+        if os.path.isdir(geo_dir):
+            las_files = sorted(
+                f for f in os.listdir(geo_dir)
+                if f.lower().endswith(('.las', '.laz'))
+            )
+            if las_files:
+                found['laz'] = [os.path.join(geo_dir, f) for f in las_files]
     return found
 
 
@@ -42,6 +52,15 @@ def detect_from_zip(zip_path: str) -> dict:
         for key, rel in ASSET_SPEC.items():
             if rel in names:
                 found[key] = rel
+        # odm_georeferencing/ 内の個別 LAS/LAZ も検出（VS Export形式）
+        if 'laz' not in found:
+            las_entries = sorted(
+                n for n in names
+                if n.startswith('odm_georeferencing/')
+                and n.lower().endswith(('.las', '.laz'))
+            )
+            if las_entries:
+                found['laz'] = las_entries
     return found
 
 

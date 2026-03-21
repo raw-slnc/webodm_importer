@@ -25,25 +25,73 @@ _ELEV_RAMP = [
 
 
 def generate_chm(dsm_path: str, dtm_path: str, output_path: str) -> str:
-    """CHM = DSM - DTM"""
+    """CHM = DSM - DTM。DSM を DTM グリッドに合わせてから演算する。"""
+    from osgeo import gdal
+    import os
+
+    dtm_ds = gdal.Open(dtm_path)
+    gt = dtm_ds.GetGeoTransform()
+    xmin = gt[0]
+    ymax = gt[3]
+    xmax = xmin + gt[1] * dtm_ds.RasterXSize
+    ymin = ymax + gt[5] * dtm_ds.RasterYSize
+    xres, yres = gt[1], abs(gt[5])
+    srs = dtm_ds.GetProjection()
+    dtm_ds = None
+
+    tmp_dsm = output_path + '.tmp.tif'
+    gdal.Warp(tmp_dsm, dsm_path,
+              outputBounds=(xmin, ymin, xmax, ymax),
+              xRes=xres, yRes=yres,
+              dstSRS=srs, format='GTiff')
+
     processing.run('gdal:rastercalculator', {
-        'INPUT_A': dsm_path, 'BAND_A': 1,
+        'INPUT_A': tmp_dsm, 'BAND_A': 1,
         'INPUT_B': dtm_path, 'BAND_B': 1,
         'FORMULA': 'A-B',
         'OUTPUT': output_path,
     })
+
+    if os.path.isfile(tmp_dsm):
+        os.remove(tmp_dsm)
     return output_path
 
 
 def generate_vegetation_index(ortho_path: str, output_path: str) -> str:
-    """VARI = (G - R) / (G + R - B)  from RGB orthophoto (bands 1=R, 2=G, 3=B)."""
-    processing.run('gdal:rastercalculator', {
-        'INPUT_A': ortho_path, 'BAND_A': 1,   # R
-        'INPUT_B': ortho_path, 'BAND_B': 2,   # G
-        'INPUT_C': ortho_path, 'BAND_C': 3,   # B
-        'FORMULA': '(B*1.0-A)/(B+A-C+0.001)',
-        'OUTPUT': output_path,
-    })
+    """VARI = (G - R) / (G + R - B)  from RGB orthophoto (bands 1=R, 2=G, 3=B).
+    nodata 領域は -9999 をセットし QGIS で透明描画させる。"""
+    from osgeo import gdal
+    _NODATA = -9999.0
+    ds = gdal.Open(ortho_path)
+    r = ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
+    g = ds.GetRasterBand(2).ReadAsArray().astype(np.float32)
+    b = ds.GetRasterBand(3).ReadAsArray().astype(np.float32)
+
+    # nodata マスク：アルファバンド（Band 4）優先、なければ nodata 値、最後に全ゼロ画素
+    if ds.RasterCount >= 4 and ds.GetRasterBand(4).GetColorInterpretation() == gdal.GCI_AlphaBand:
+        alpha = ds.GetRasterBand(4).ReadAsArray()
+        nodata_mask = (alpha == 0)
+    else:
+        nodata_val = ds.GetRasterBand(1).GetNoDataValue()
+        if nodata_val is not None:
+            nodata_mask = (r == nodata_val)
+        else:
+            nodata_mask = (r == 0) & (g == 0) & (b == 0)
+
+    vari = (g - r) / (g + r - b + 0.001)
+    vari = np.clip(vari, -1.0, 1.0)
+    vari[nodata_mask] = _NODATA
+
+    h, w = r.shape
+    driver = gdal.GetDriverByName('GTiff')
+    ds_out = driver.Create(output_path, w, h, 1, gdal.GDT_Float32)
+    ds_out.SetGeoTransform(ds.GetGeoTransform())
+    ds_out.SetProjection(ds.GetProjection())
+    band = ds_out.GetRasterBand(1)
+    band.WriteArray(vari)
+    band.SetNoDataValue(_NODATA)
+    ds_out.FlushCache()
+    ds_out = ds = None
     return output_path
 
 
@@ -70,8 +118,17 @@ def render_elevation_composite(elev_path: str, hs_path: str, output_path: str) -
     nodata = band.GetNoDataValue()
 
     valid = elev if nodata is None else elev[elev != nodata]
-    lo, hi = float(np.nanmin(valid)), float(np.nanmax(valid))
+    valid = valid[np.isfinite(valid)]
+    if valid.size == 0:
+        lo, hi = 0.0, 1.0
+    else:
+        lo, hi = float(np.nanmin(valid)), float(np.nanmax(valid))
     span = max(hi - lo, 1e-10)
+
+    # nodata マスク（透明化対象）
+    nodata_mask = ~np.isfinite(elev)
+    if nodata is not None:
+        nodata_mask |= (elev == nodata)
 
     # Normalize elevation to 0-1 and apply rainbow ramp
     t = np.clip((elev - lo) / span, 0.0, 1.0)
@@ -91,13 +148,17 @@ def render_elevation_composite(elev_path: str, hs_path: str, output_path: str) -
     for ch in range(3):
         rgb[:, :, ch] = np.clip(rgb[:, :, ch] * (hs * 0.7 + 0.3), 0, 255)
 
-    # Write RGB GeoTIFF
+    # Write RGBA GeoTIFF（nodata 領域はアルファ 0 で透明）
     driver = gdal.GetDriverByName('GTiff')
-    ds_out = driver.Create(output_path, w, h, 3, gdal.GDT_Byte)
+    ds_out = driver.Create(output_path, w, h, 4, gdal.GDT_Byte)
     ds_out.SetGeoTransform(ds_elev.GetGeoTransform())
     ds_out.SetProjection(ds_elev.GetProjection())
     for ch in range(3):
         ds_out.GetRasterBand(ch + 1).WriteArray(rgb[:, :, ch].astype(np.uint8))
+    alpha_band = np.where(nodata_mask, 0, 255).astype(np.uint8)
+    band4 = ds_out.GetRasterBand(4)
+    band4.WriteArray(alpha_band)
+    band4.SetColorInterpretation(gdal.GCI_AlphaBand)
     ds_out.FlushCache()
     ds_out = ds_hs = ds_elev = None
     return output_path

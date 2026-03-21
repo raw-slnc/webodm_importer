@@ -11,10 +11,78 @@ import json
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QCheckBox, QFileDialog,
-    QComboBox, QGroupBox,
+    QComboBox, QGroupBox, QProgressBar,
 )
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal
 from qgis.core import QgsPointCloudLayer, QgsRasterLayer, QgsProject
+
+
+class _CopcWorker(QThread):
+    """PDAL による LAS → COPC 変換をバックグラウンドで実行する。"""
+    finished = pyqtSignal(str)  # copc_path（失敗時は空文字）
+
+    def __init__(self, las_paths, copc_path, parent=None):
+        super().__init__(parent)
+        self._las_paths = las_paths
+        self._copc_path = copc_path
+
+    def run(self):
+        import subprocess, json, tempfile
+        copc_path = self._copc_path
+
+        if len(self._las_paths) == 1:
+            # 単一ファイルは直接 COPC 変換
+            pipeline = {"pipeline": self._las_paths + [
+                {"type": "writers.copc", "filename": copc_path},
+            ]}
+            try:
+                r = subprocess.run(
+                    ['pdal', 'pipeline', '--stdin'],
+                    input=json.dumps(pipeline),
+                    capture_output=True, text=True, timeout=600,
+                )
+                if r.returncode == 0 and os.path.isfile(copc_path):
+                    self.finished.emit(copc_path)
+                    return
+            except Exception:
+                pass
+        else:
+            # 複数ファイル: 一旦 LAS にマージしてから COPC 化
+            # （PDAL writers.copc の複数入力でオクツリー中心がずれるバグを回避）
+            tmp_las = copc_path + '.tmp.las'
+            try:
+                merge_pipeline = {"pipeline": self._las_paths + [
+                    {"type": "filters.merge"},
+                    {"type": "writers.las", "filename": tmp_las},
+                ]}
+                r = subprocess.run(
+                    ['pdal', 'pipeline', '--stdin'],
+                    input=json.dumps(merge_pipeline),
+                    capture_output=True, text=True, timeout=600,
+                )
+                if r.returncode != 0 or not os.path.isfile(tmp_las):
+                    self.finished.emit('')
+                    return
+
+                copc_pipeline = {"pipeline": [
+                    tmp_las,
+                    {"type": "writers.copc", "filename": copc_path},
+                ]}
+                r = subprocess.run(
+                    ['pdal', 'pipeline', '--stdin'],
+                    input=json.dumps(copc_pipeline),
+                    capture_output=True, text=True, timeout=600,
+                )
+                if r.returncode == 0 and os.path.isfile(copc_path):
+                    self.finished.emit(copc_path)
+                    return
+            except Exception:
+                pass
+            finally:
+                if os.path.isfile(tmp_las):
+                    os.remove(tmp_las)
+
+        self.finished.emit('')
 
 from . import asset_detector, processor
 
@@ -164,6 +232,11 @@ class WebODMPanel(QDockWidget):
         self._btn_run.clicked.connect(self._run)
         lay.addWidget(self._btn_run)
 
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 0)
+        self._progress_bar.setVisible(False)
+        lay.addWidget(self._progress_bar)
+
         self._lbl_run_status = QLabel()
         self._lbl_run_status.setWordWrap(True)
         self._lbl_run_status.setStyleSheet('font-size: 11px;')
@@ -235,6 +308,103 @@ class WebODMPanel(QDockWidget):
             if not os.path.exists(candidate):
                 return candidate
             i += 1
+
+    def _crs_from_las(self, las_path):
+        """LAS VLR から CRS を読み取る。取得できなければ None を返す。"""
+        try:
+            import laspy
+            from qgis.core import QgsCoordinateReferenceSystem
+            las = laspy.read(las_path)
+            crs = las.header.parse_crs()
+            if crs is None:
+                return None
+            wkt = crs.to_wkt()
+            if wkt:
+                return QgsCoordinateReferenceSystem.fromWkt(wkt)
+        except Exception:
+            pass
+        return None
+
+    def _load_point_cloud(self, laz_val, out_dir):
+        """LAS/LAZ をポイントクラウドレイヤーとして返す。複数ファイルは結合 COPC に変換する。"""
+        las_paths = laz_val if isinstance(laz_val, list) else [laz_val]
+        crs = self._crs_from_las(las_paths[0])
+
+        # 単一ファイルは直接読み込みを試みる
+        if len(las_paths) == 1:
+            for provider in ('pdal', 'copc'):
+                layer = QgsPointCloudLayer(las_paths[0], 'Point Cloud', provider)
+                if layer.isValid():
+                    if crs and crs.isValid() and not layer.crs().isValid():
+                        layer.setCrs(crs)
+                    return layer
+
+        copc_path = self._convert_to_copc(las_paths, out_dir)
+        if copc_path:
+            layer = QgsPointCloudLayer(copc_path, 'Point Cloud', 'copc')
+            if layer.isValid():
+                if crs and crs.isValid() and not layer.crs().isValid():
+                    layer.setCrs(crs)
+                return layer
+        return None
+
+    def _convert_to_copc(self, las_paths, out_dir):
+        """PDAL CLI で LAS/LAZ（単数または複数）→ COPC 変換。変換済みなら再利用する。"""
+        import subprocess, json
+        las_paths = las_paths if isinstance(las_paths, list) else [las_paths]
+        pc_cache = os.path.join(out_dir, 'pc_cache')
+        os.makedirs(pc_cache, exist_ok=True)
+        if len(las_paths) == 1:
+            base = os.path.splitext(os.path.basename(las_paths[0]))[0]
+        else:
+            base = 'merged'
+        copc_path = os.path.join(pc_cache, base + '.copc.laz')
+        if os.path.isfile(copc_path):
+            return copc_path
+        if len(las_paths) == 1:
+            pipeline = {"pipeline": las_paths + [
+                {"type": "writers.copc", "filename": copc_path},
+            ]}
+            try:
+                r = subprocess.run(
+                    ['pdal', 'pipeline', '--stdin'],
+                    input=json.dumps(pipeline),
+                    capture_output=True, text=True, timeout=300,
+                )
+                if r.returncode == 0 and os.path.isfile(copc_path):
+                    return copc_path
+            except Exception:
+                pass
+        else:
+            tmp_las = copc_path + '.tmp.las'
+            try:
+                merge_pipeline = {"pipeline": las_paths + [
+                    {"type": "filters.merge"},
+                    {"type": "writers.las", "filename": tmp_las},
+                ]}
+                r = subprocess.run(
+                    ['pdal', 'pipeline', '--stdin'],
+                    input=json.dumps(merge_pipeline),
+                    capture_output=True, text=True, timeout=300,
+                )
+                if r.returncode == 0 and os.path.isfile(tmp_las):
+                    copc_pipeline = {"pipeline": [
+                        tmp_las,
+                        {"type": "writers.copc", "filename": copc_path},
+                    ]}
+                    r = subprocess.run(
+                        ['pdal', 'pipeline', '--stdin'],
+                        input=json.dumps(copc_pipeline),
+                        capture_output=True, text=True, timeout=300,
+                    )
+                    if r.returncode == 0 and os.path.isfile(copc_path):
+                        return copc_path
+            except Exception:
+                pass
+            finally:
+                if os.path.isfile(tmp_las):
+                    os.remove(tmp_las)
+        return None
 
     def _add_to_group(self, layer, group):
         QgsProject.instance().addMapLayer(layer, False)
@@ -414,9 +584,10 @@ class WebODMPanel(QDockWidget):
             self._add_to_group(layer, group)
             added.append('Point Cloud')
         elif 'laz' in assets:
-            layer = QgsPointCloudLayer(assets['laz'], 'Point Cloud', 'pdal')
-            self._add_to_group(layer, group)
-            added.append('Point Cloud')
+            layer = self._load_point_cloud(assets['laz'], folder)
+            if layer:
+                self._add_to_group(layer, group)
+                added.append('Point Cloud')
 
         if added:
             group.setExpanded(True)
@@ -426,6 +597,15 @@ class WebODMPanel(QDockWidget):
             root.removeChildNode(group)
             self._lbl_existing_status.setText('No valid layers found.')
             self._lbl_existing_status.setStyleSheet(_note_style('orange'))
+
+    def _set_running(self, running):
+        self._btn_run.setVisible(not running)
+        self._progress_bar.setVisible(running)
+
+    def _update_status(self, text):
+        from qgis.PyQt.QtWidgets import QApplication
+        self._lbl_run_status.setText(text)
+        QApplication.processEvents()
 
     def _run(self):
         base = self._output_base()
@@ -446,13 +626,31 @@ class WebODMPanel(QDockWidget):
         out_dir = self._resolve_output_dir(group_name)
         os.makedirs(out_dir, exist_ok=True)
 
-        self._lbl_run_status.setText('Processing…')
-        self._lbl_run_status.repaint()
+        # ステップ数を事前に算出してプログレスバーを確定表示
+        chk = self._chk_hillshade.isChecked()
+        a = self._assets
+        has_laz_conversion = self._chk_laz.isChecked() and 'laz' in a and 'ept' not in a
+        steps = (
+            (1 if self._is_zip else 0)
+            + (1 if self._chk_ortho.isChecked() and 'ortho' in a else 0)
+            + (1 if self._chk_vegetation.isChecked() and 'ortho' in a else 0)
+            + (2 if chk and self._chk_dsm.isChecked() and 'dsm' in a else 0)
+            + (2 if chk and 'dtm' in a else 0)
+            + (1 if self._chk_chm.isChecked() and 'dsm' in a and 'dtm' in a else 0)
+            + (2 if has_laz_conversion else 1 if self._chk_laz.isChecked() and 'ept' in a else 0)
+        )
+        self._progress_bar.setRange(0, max(steps, 1))
+        self._progress_bar.setValue(0)
+        self._set_running(True)
+        self._update_status('Processing…')
+
+        def _step(label):
+            self._progress_bar.setValue(self._progress_bar.value() + 1)
+            self._update_status(label)
 
         abs_assets = {}
         if self._is_zip:
-            self._lbl_run_status.setText('Extracting ZIP…')
-            self._lbl_run_status.repaint()
+            _step('Extracting ZIP…')
             with zipfile.ZipFile(self._source_path, 'r') as zf:
                 all_names = zf.namelist()
                 for key, rel in self._assets.items():
@@ -460,9 +658,14 @@ class WebODMPanel(QDockWidget):
                         for name in all_names:
                             if name.startswith('entwine_pointcloud/'):
                                 zf.extract(name, out_dir)
+                        abs_assets[key] = os.path.join(out_dir, rel)
+                    elif isinstance(rel, list):
+                        for r in rel:
+                            zf.extract(r, out_dir)
+                        abs_assets[key] = [os.path.join(out_dir, r) for r in rel]
                     else:
                         zf.extract(rel, out_dir)
-                    abs_assets[key] = os.path.join(out_dir, rel)
+                        abs_assets[key] = os.path.join(out_dir, rel)
         else:
             abs_assets = self._assets
 
@@ -472,6 +675,7 @@ class WebODMPanel(QDockWidget):
 
         # Orthophoto
         if self._chk_ortho.isChecked() and 'ortho' in abs_assets:
+            _step('Loading Orthophoto…')
             layer = QgsRasterLayer(abs_assets['ortho'], 'Orthophoto')
             if layer.isValid():
                 self._add_to_group(layer, group)
@@ -480,8 +684,7 @@ class WebODMPanel(QDockWidget):
         # Vegetation
         if self._chk_vegetation.isChecked() and 'ortho' in abs_assets:
             veg_path = os.path.join(out_dir, 'vegetation.tif')
-            self._lbl_run_status.setText('Generating vegetation index…')
-            self._lbl_run_status.repaint()
+            _step('Generating vegetation index…')
             processor.generate_vegetation_index(abs_assets['ortho'], veg_path)
             layer = QgsRasterLayer(veg_path, 'Vegetation (VARI)')
             if layer.isValid():
@@ -497,11 +700,9 @@ class WebODMPanel(QDockWidget):
         # Surface Model (baked composite RGB)
         if self._chk_dsm.isChecked() and 'dsm' in abs_assets:
             if self._chk_hillshade.isChecked():
-                self._lbl_run_status.setText('Generating hillshade (DSM)…')
-                self._lbl_run_status.repaint()
+                _step('Generating hillshade (DSM)…')
                 processor.generate_hillshade(abs_assets['dsm'], hs_dsm_path)
-                self._lbl_run_status.setText('Rendering Surface Model…')
-                self._lbl_run_status.repaint()
+                _step('Rendering Surface Model…')
                 processor.render_elevation_composite(abs_assets['dsm'], hs_dsm_path, comp_dsm_path)
                 layer = QgsRasterLayer(comp_dsm_path, 'Surface Model')
                 if layer.isValid():
@@ -511,11 +712,9 @@ class WebODMPanel(QDockWidget):
         # Terrain Model (baked composite RGB)
         if 'dtm' in abs_assets:
             if self._chk_hillshade.isChecked():
-                self._lbl_run_status.setText('Generating hillshade (DTM)…')
-                self._lbl_run_status.repaint()
+                _step('Generating hillshade (DTM)…')
                 processor.generate_hillshade(abs_assets['dtm'], hs_dtm_path)
-                self._lbl_run_status.setText('Rendering Terrain Model…')
-                self._lbl_run_status.repaint()
+                _step('Rendering Terrain Model…')
                 processor.render_elevation_composite(abs_assets['dtm'], hs_dtm_path, comp_dtm_path)
                 layer = QgsRasterLayer(comp_dtm_path, 'Terrain Model')
                 if layer.isValid():
@@ -543,8 +742,7 @@ class WebODMPanel(QDockWidget):
         # CHM
         if self._chk_chm.isChecked() and asset_detector.can_generate_chm(abs_assets):
             chm_path = os.path.join(out_dir, 'chm.tif')
-            self._lbl_run_status.setText('Generating CHM…')
-            self._lbl_run_status.repaint()
+            _step('Generating CHM…')
             processor.generate_chm(abs_assets['dsm'], abs_assets['dtm'], chm_path)
             layer = QgsRasterLayer(chm_path, 'CHM')
             if layer.isValid():
@@ -552,15 +750,65 @@ class WebODMPanel(QDockWidget):
                 added.append('CHM')
 
         # Point Cloud (EPT preferred, LAZ fallback)
+        pc_layer = None
         if self._chk_laz.isChecked():
             if 'ept' in abs_assets:
-                layer = QgsPointCloudLayer(abs_assets['ept'], 'Point Cloud', 'ept')
-                self._add_to_group(layer, group)
-                added.append('Point Cloud')
-            elif 'laz' in abs_assets:
-                layer = QgsPointCloudLayer(abs_assets['laz'], 'Point Cloud', 'pdal')
-                self._add_to_group(layer, group)
-                added.append('Point Cloud')
+                _step('Loading Point Cloud…')
+                ept_layer = QgsPointCloudLayer(abs_assets['ept'], 'Point Cloud', 'ept')
+                if ept_layer.isValid():
+                    pc_layer = ept_layer
+
+        self._run_state = {
+            'group': group, 'added': added, 'out_dir': out_dir,
+            'root': root, 'pc_layer': pc_layer,
+            'laz': abs_assets.get('laz') if self._chk_laz.isChecked() else None,
+            'step': _step,
+        }
+
+        if pc_layer:
+            self._on_copc_done(None)
+        elif self._run_state['laz']:
+            _step('Converting Point Cloud…')
+            self._start_copc_worker(abs_assets['laz'], out_dir)
+        else:
+            self._on_copc_done(None)
+
+    def _start_copc_worker(self, laz_val, out_dir):
+        las_paths = laz_val if isinstance(laz_val, list) else [laz_val]
+        crs = self._crs_from_las(las_paths[0])
+        pc_cache = os.path.join(out_dir, 'pc_cache')
+        os.makedirs(pc_cache, exist_ok=True)
+        base = 'merged' if len(las_paths) > 1 else os.path.splitext(os.path.basename(las_paths[0]))[0]
+        copc_path = os.path.join(pc_cache, base + '.copc.laz')
+        self._run_state['crs'] = crs
+
+        if os.path.isfile(copc_path):
+            self._on_copc_done(copc_path)
+            return
+
+        self._copc_worker = _CopcWorker(las_paths, copc_path, self)
+        self._copc_worker.finished.connect(self._on_copc_done)
+        self._copc_worker.start()
+
+    def _on_copc_done(self, copc_path):
+        state = self._run_state
+        group = state['group']
+        added = state['added']
+        out_dir = state['out_dir']
+        root = state['root']
+        pc_layer = state.get('pc_layer')
+
+        if copc_path:
+            from qgis.core import QgsCoordinateReferenceSystem
+            state.get('step', lambda _: None)('Loading Point Cloud…')
+            pc_layer = QgsPointCloudLayer(copc_path, 'Point Cloud', 'copc')
+            crs = state.get('crs')
+            if pc_layer.isValid() and crs and crs.isValid() and not pc_layer.crs().isValid():
+                pc_layer.setCrs(crs)
+
+        if pc_layer and pc_layer.isValid():
+            self._add_to_group(pc_layer, group)
+            added.append('Point Cloud')
 
         if added:
             group.setExpanded(True)
@@ -572,3 +820,5 @@ class WebODMPanel(QDockWidget):
             root.removeChildNode(group)
             self._lbl_run_status.setText('No layers added.')
             self._lbl_run_status.setStyleSheet('color: orange; font-size: 11px;')
+
+        self._set_running(False)
