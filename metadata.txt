@@ -8,7 +8,7 @@
 name=WebODM Importer
 qgisMinimumVersion=3.18
 description=Import WebODM task output into QGIS with automatic asset detection and layer generation.
-version=0.1.0
+version=0.2.0
 author=Hideharu Masai
 email=hideharumasai@void.mints.ne.jp
 
@@ -22,6 +22,7 @@ repository=https://github.com/raw-slnc/webodm_importer
 
 hasProcessingProvider=no
 changelog=
+    0.2.0 - LAS/LAZ point cloud support with automatic COPC conversion (pdal CLI); multiple LAS files merged; CRS auto-assigned from VLR; background conversion with progress bar; CHM extent mismatch fix; data loading improvement
     0.1.0 - Initial release
 
 tags=webodm,drone,photogrammetry,dem,dsm,dtm,chm,orthophoto,forestry
