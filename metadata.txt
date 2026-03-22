@@ -22,6 +22,7 @@ repository=https://github.com/raw-slnc/webodm_importer
 
 hasProcessingProvider=no
 changelog=
+    0.2.0 - Stop button to cancel processing; Convert LAS to COPC checkbox in Load Existing with async progress display; confirmation dialog before point cloud conversion; button width adjustments
     0.2.0 - LAS/LAZ point cloud support with automatic COPC conversion (pdal CLI); multiple LAS files merged; CRS auto-assigned from VLR; background conversion with progress bar; CHM extent mismatch fix; data loading improvement
     0.1.0 - Initial release
 
