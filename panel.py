@@ -11,9 +11,10 @@ import json
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QCheckBox, QFileDialog,
-    QComboBox, QGroupBox, QProgressBar,
+    QComboBox, QGroupBox, QProgressBar, QMessageBox,
 )
-from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal
+from qgis.PyQt.QtCore import Qt, QThread, QTimer, pyqtSignal
+import time
 from qgis.core import QgsPointCloudLayer, QgsRasterLayer, QgsProject
 
 
@@ -27,21 +28,54 @@ class _CopcWorker(QThread):
         self._copc_path = copc_path
 
     def run(self):
-        import subprocess, json, tempfile
+        import subprocess, json, sys, shutil, uuid
+
         copc_path = self._copc_path
 
-        if len(self._las_paths) == 1:
+        def _short(p):
+            """Windows: 日本語パスを 8.3 形式に変換して PDAL に渡す。"""
+            if sys.platform != 'win32':
+                return p
+            try:
+                import ctypes
+                buf = ctypes.create_unicode_buffer(512)
+                ctypes.windll.kernel32.GetShortPathNameW(p, buf, 512)
+                return buf.value or p
+            except Exception:
+                return p
+
+        # Windows: コマンドプロンプトウィンドウを開かない
+        _win_flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+
+        # Windows: 出力先に ASCII 一時パスを使い、完了後に本来のパスへリネーム
+        if sys.platform == 'win32':
+            import tempfile
+            _uid = uuid.uuid4().hex[:8]
+            tmp_copc = os.path.join(tempfile.gettempdir(), f'pdal_tmp_{_uid}.copc.laz')
+        else:
+            tmp_copc = copc_path
+
+        las_paths = [_short(p) for p in self._las_paths]
+
+        def _finalize_copc():
+            """tmp_copc → copc_path へ移動（Windows のみ）。"""
+            if tmp_copc != copc_path and os.path.isfile(tmp_copc):
+                shutil.move(tmp_copc, copc_path)
+
+        if len(las_paths) == 1:
             # 単一ファイルは直接 COPC 変換
-            pipeline = {"pipeline": self._las_paths + [
-                {"type": "writers.copc", "filename": copc_path},
+            pipeline = {"pipeline": las_paths + [
+                {"type": "writers.copc", "filename": tmp_copc},
             ]}
             try:
                 r = subprocess.run(
                     ['pdal', 'pipeline', '--stdin'],
                     input=json.dumps(pipeline),
-                    capture_output=True, text=True, timeout=600,
+                    capture_output=True, text=True, encoding='utf-8', timeout=600,
+                    creationflags=_win_flags,
                 )
-                if r.returncode == 0 and os.path.isfile(copc_path):
+                if r.returncode == 0 and os.path.isfile(tmp_copc):
+                    _finalize_copc()
                     self.finished.emit(copc_path)
                     return
             except Exception:
@@ -49,16 +83,21 @@ class _CopcWorker(QThread):
         else:
             # 複数ファイル: 一旦 LAS にマージしてから COPC 化
             # （PDAL writers.copc の複数入力でオクツリー中心がずれるバグを回避）
-            tmp_las = copc_path + '.tmp.las'
+            if sys.platform == 'win32':
+                import tempfile
+                tmp_las = os.path.join(tempfile.gettempdir(), f'pdal_tmp_{_uid}.las')
+            else:
+                tmp_las = copc_path + '.tmp.las'
             try:
-                merge_pipeline = {"pipeline": self._las_paths + [
+                merge_pipeline = {"pipeline": las_paths + [
                     {"type": "filters.merge"},
                     {"type": "writers.las", "filename": tmp_las},
                 ]}
                 r = subprocess.run(
                     ['pdal', 'pipeline', '--stdin'],
                     input=json.dumps(merge_pipeline),
-                    capture_output=True, text=True, timeout=600,
+                    capture_output=True, text=True, encoding='utf-8', timeout=600,
+                    creationflags=_win_flags,
                 )
                 if r.returncode != 0 or not os.path.isfile(tmp_las):
                     self.finished.emit('')
@@ -66,14 +105,16 @@ class _CopcWorker(QThread):
 
                 copc_pipeline = {"pipeline": [
                     tmp_las,
-                    {"type": "writers.copc", "filename": copc_path},
+                    {"type": "writers.copc", "filename": tmp_copc},
                 ]}
                 r = subprocess.run(
                     ['pdal', 'pipeline', '--stdin'],
                     input=json.dumps(copc_pipeline),
-                    capture_output=True, text=True, timeout=600,
+                    capture_output=True, text=True, encoding='utf-8', timeout=600,
+                    creationflags=_win_flags,
                 )
-                if r.returncode == 0 and os.path.isfile(copc_path):
+                if r.returncode == 0 and os.path.isfile(tmp_copc):
+                    _finalize_copc()
                     self.finished.emit(copc_path)
                     return
             except Exception:
@@ -85,6 +126,11 @@ class _CopcWorker(QThread):
         self.finished.emit('')
 
 from . import asset_detector, processor
+
+
+def _pdal_available() -> bool:
+    import shutil
+    return shutil.which('pdal') is not None
 
 
 class _AutoRefreshCombo(QComboBox):
@@ -126,9 +172,10 @@ class WebODMPanel(QDockWidget):
         lay.setSpacing(4)
         row_src = QHBoxLayout()
         self._src_edit = QLineEdit()
-        self._src_edit.setPlaceholderText('Select ZIP or folder…')
+        self._src_edit.setPlaceholderText('Select ZIP…')
         self._src_edit.setReadOnly(True)
         btn_src = QPushButton('Select ZIP')
+        btn_src.setFixedWidth(90)
         btn_src.clicked.connect(self._select_source)
         row_src.addWidget(self._src_edit)
         row_src.addWidget(btn_src)
@@ -215,10 +262,13 @@ class WebODMPanel(QDockWidget):
         self._combo_existing = _AutoRefreshCombo(self._refresh_existing_combo)
         row_existing.addWidget(self._combo_existing)
         btn_load = QPushButton('Load')
-        btn_load.setFixedWidth(48)
+        btn_load.setFixedWidth(90)
         btn_load.clicked.connect(self._load_existing)
         row_existing.addWidget(btn_load)
         lay.addLayout(row_existing)
+        self._chk_convert_laz = QCheckBox('Convert LAS to COPC')
+        self._chk_convert_laz.setEnabled(False)
+        lay.addWidget(self._chk_convert_laz)
         self._lbl_existing_status = QLabel()
         self._lbl_existing_status.setStyleSheet(_note_style())
         lay.addWidget(self._lbl_existing_status)
@@ -227,10 +277,16 @@ class WebODMPanel(QDockWidget):
         # ── Run ────────────────────────────────────
         grp = QGroupBox('Run')
         lay = QVBoxLayout(grp)
+        row_run = QHBoxLayout()
         self._btn_run = QPushButton('Run')
         self._btn_run.setEnabled(False)
         self._btn_run.clicked.connect(self._run)
-        lay.addWidget(self._btn_run)
+        row_run.addWidget(self._btn_run)
+        self._btn_stop = QPushButton('Stop')
+        self._btn_stop.setVisible(False)
+        self._btn_stop.clicked.connect(self._cancel)
+        row_run.addWidget(self._btn_stop)
+        lay.addLayout(row_run)
 
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 0)
@@ -250,6 +306,7 @@ class WebODMPanel(QDockWidget):
 
         main.addStretch()
 
+        self._combo_existing.currentIndexChanged.connect(self._update_convert_laz_checkbox)
         self._refresh_existing_combo()
 
     # ── Helpers ─────────────────────────────────────
@@ -350,54 +407,87 @@ class WebODMPanel(QDockWidget):
 
     def _convert_to_copc(self, las_paths, out_dir):
         """PDAL CLI で LAS/LAZ（単数または複数）→ COPC 変換。変換済みなら再利用する。"""
-        import subprocess, json
+        import subprocess, json, sys, shutil, uuid
         las_paths = las_paths if isinstance(las_paths, list) else [las_paths]
         pc_cache = os.path.join(out_dir, 'pc_cache')
         os.makedirs(pc_cache, exist_ok=True)
-        if len(las_paths) == 1:
-            base = os.path.splitext(os.path.basename(las_paths[0]))[0]
-        else:
-            base = 'merged'
+        base = os.path.splitext(os.path.basename(las_paths[0]))[0] if len(las_paths) == 1 else 'merged'
         copc_path = os.path.join(pc_cache, base + '.copc.laz')
         if os.path.isfile(copc_path):
             return copc_path
-        if len(las_paths) == 1:
-            pipeline = {"pipeline": las_paths + [
-                {"type": "writers.copc", "filename": copc_path},
+
+        def _short(p):
+            if sys.platform != 'win32':
+                return p
+            try:
+                import ctypes
+                buf = ctypes.create_unicode_buffer(512)
+                ctypes.windll.kernel32.GetShortPathNameW(p, buf, 512)
+                return buf.value or p
+            except Exception:
+                return p
+
+        _win_flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+
+        if sys.platform == 'win32':
+            import tempfile
+            _uid = uuid.uuid4().hex[:8]
+            tmp_copc = os.path.join(tempfile.gettempdir(), f'pdal_tmp_{_uid}.copc.laz')
+        else:
+            tmp_copc = copc_path
+
+        safe_paths = [_short(p) for p in las_paths]
+
+        def _finalize():
+            if tmp_copc != copc_path and os.path.isfile(tmp_copc):
+                shutil.move(tmp_copc, copc_path)
+
+        if len(safe_paths) == 1:
+            pipeline = {"pipeline": safe_paths + [
+                {"type": "writers.copc", "filename": tmp_copc},
             ]}
             try:
                 r = subprocess.run(
                     ['pdal', 'pipeline', '--stdin'],
                     input=json.dumps(pipeline),
-                    capture_output=True, text=True, timeout=300,
+                    capture_output=True, text=True, encoding='utf-8', timeout=300,
+                    creationflags=_win_flags,
                 )
-                if r.returncode == 0 and os.path.isfile(copc_path):
+                if r.returncode == 0 and os.path.isfile(tmp_copc):
+                    _finalize()
                     return copc_path
             except Exception:
                 pass
         else:
-            tmp_las = copc_path + '.tmp.las'
+            if sys.platform == 'win32':
+                import tempfile
+                tmp_las = os.path.join(tempfile.gettempdir(), f'pdal_tmp_{_uid}.las')
+            else:
+                tmp_las = copc_path + '.tmp.las'
             try:
-                merge_pipeline = {"pipeline": las_paths + [
+                merge_pipeline = {"pipeline": safe_paths + [
                     {"type": "filters.merge"},
                     {"type": "writers.las", "filename": tmp_las},
                 ]}
                 r = subprocess.run(
                     ['pdal', 'pipeline', '--stdin'],
                     input=json.dumps(merge_pipeline),
-                    capture_output=True, text=True, timeout=300,
+                    capture_output=True, text=True, encoding='utf-8', timeout=300,
+                    creationflags=_win_flags,
                 )
                 if r.returncode == 0 and os.path.isfile(tmp_las):
                     copc_pipeline = {"pipeline": [
                         tmp_las,
-                        {"type": "writers.copc", "filename": copc_path},
+                        {"type": "writers.copc", "filename": tmp_copc},
                     ]}
                     r = subprocess.run(
                         ['pdal', 'pipeline', '--stdin'],
                         input=json.dumps(copc_pipeline),
-                        capture_output=True, text=True, timeout=300,
+                        capture_output=True, text=True, encoding='utf-8', timeout=300,
+                        creationflags=_win_flags,
                     )
-                    if r.returncode == 0 and os.path.isfile(copc_path):
+                    if r.returncode == 0 and os.path.isfile(tmp_copc):
+                        _finalize()
                         return copc_path
             except Exception:
                 pass
@@ -439,6 +529,34 @@ class WebODMPanel(QDockWidget):
                     idx = self._combo_existing.count() - 1
                     self._combo_existing.model().item(idx).setEnabled(False)
                     self._combo_existing.model().item(idx).setForeground(QColor('gray'))
+
+    def _update_convert_laz_checkbox(self):
+        selected = self._combo_existing.currentText()
+        if selected == '— select —':
+            self._chk_convert_laz.setEnabled(False)
+            self._chk_convert_laz.setChecked(False)
+            return
+        base = self._output_base()
+        if not base:
+            self._chk_convert_laz.setEnabled(False)
+            return
+        folder = os.path.join(base, selected)
+        assets = asset_detector.detect(folder)
+        has_laz = 'laz' in assets and 'ept' not in assets
+        if not has_laz or not _pdal_available():
+            self._chk_convert_laz.setEnabled(False)
+            self._chk_convert_laz.setChecked(False)
+            return
+        laz_val = assets['laz']
+        las_paths = laz_val if isinstance(laz_val, list) else [laz_val]
+        base_name = 'merged' if len(las_paths) > 1 else os.path.splitext(os.path.basename(las_paths[0]))[0]
+        copc_path = os.path.join(folder, 'pc_cache', base_name + '.copc.laz')
+        if os.path.isfile(copc_path):
+            self._chk_convert_laz.setEnabled(False)
+            self._chk_convert_laz.setChecked(False)
+        else:
+            self._chk_convert_laz.setEnabled(True)
+            self._chk_convert_laz.setChecked(False)
 
     # ── Slots ────────────────────────────────────────
     def _select_source(self):
@@ -487,8 +605,15 @@ class WebODMPanel(QDockWidget):
         self._chk_chm.setText('CHM' if can_chm else 'CHM\n(DSM or DTM missing)')
 
         has_pc = 'ept' in self._assets or 'laz' in self._assets
-        self._chk_laz.setChecked(has_pc)
-        self._chk_laz.setEnabled(has_pc)
+        laz_only = 'laz' in self._assets and 'ept' not in self._assets
+        if laz_only and not _pdal_available():
+            self._chk_laz.setText('Point cloud\n(PDAL is required for LAZ conversion.)')
+            self._chk_laz.setChecked(False)
+            self._chk_laz.setEnabled(False)
+        else:
+            self._chk_laz.setText('Point cloud')
+            self._chk_laz.setChecked(has_pc)
+            self._chk_laz.setEnabled(has_pc)
 
         base = self._output_base()
         if base:
@@ -583,24 +708,45 @@ class WebODMPanel(QDockWidget):
             layer = QgsPointCloudLayer(assets['ept'], 'Point Cloud', 'ept')
             self._add_to_group(layer, group)
             added.append('Point Cloud')
-        elif 'laz' in assets:
-            layer = self._load_point_cloud(assets['laz'], folder)
-            if layer:
-                self._add_to_group(layer, group)
-                added.append('Point Cloud')
-
-        if added:
-            group.setExpanded(True)
-            self._lbl_existing_status.setText('Loaded: ' + ', '.join(added))
-            self._lbl_existing_status.setStyleSheet(_note_style('green'))
+            self._finish_load_existing(group, added)
+        elif 'laz' in assets and self._chk_convert_laz.isChecked():
+            msg = QMessageBox(self)
+            msg.setWindowTitle('Point Cloud')
+            msg.setText(
+                'Converting large LAS files may take a long time.\n'
+                'Do you want to continue?'
+            )
+            btn_continue = msg.addButton('Continue', QMessageBox.AcceptRole)
+            msg.addButton('Skip LAS Conversion', QMessageBox.RejectRole)
+            msg.exec_()
+            if msg.clickedButton() != btn_continue:
+                self._finish_load_existing(group, added)
+                return
+            laz_val = assets['laz']
+            self._load_state = {
+                'group': group, 'added': added, 'folder': folder,
+            }
+            self._progress_bar.setRange(0, 0)
+            self._set_running(True)
+            self._update_status('Converting Point Cloud…')
+            self._start_copc_worker(laz_val, folder, on_done=self._on_load_copc_done)
         else:
-            root.removeChildNode(group)
-            self._lbl_existing_status.setText('No valid layers found.')
-            self._lbl_existing_status.setStyleSheet(_note_style('orange'))
+            self._finish_load_existing(group, added)
 
     def _set_running(self, running):
         self._btn_run.setVisible(not running)
+        self._btn_stop.setVisible(running)
+        self._btn_stop.setEnabled(running)
         self._progress_bar.setVisible(running)
+
+    def _cancel(self):
+        self._cancelled = True
+        self._btn_stop.setEnabled(False)
+        self._update_status('Cancelling…')
+        if hasattr(self, '_copc_worker') and self._copc_worker.isRunning():
+            self._copc_worker.terminate()
+            self._copc_worker.wait(3000)
+
 
     def _update_status(self, text):
         from qgis.PyQt.QtWidgets import QApplication
@@ -609,6 +755,7 @@ class WebODMPanel(QDockWidget):
 
     def _run(self):
         base = self._output_base()
+        self._cancelled = False
         if not base:
             self._lbl_run_status.setText('Save the project before running.')
             self._lbl_run_status.setStyleSheet('color: red; font-size: 11px;')
@@ -681,6 +828,14 @@ class WebODMPanel(QDockWidget):
                 self._add_to_group(layer, group)
                 added.append('Orthophoto')
 
+
+        if self._cancelled:
+            root.removeChildNode(group)
+            self._lbl_run_status.setText('Cancelled.')
+            self._lbl_run_status.setStyleSheet('color: orange; font-size: 11px;')
+            self._set_running(False)
+            return
+
         # Vegetation
         if self._chk_vegetation.isChecked() and 'ortho' in abs_assets:
             veg_path = os.path.join(out_dir, 'vegetation.tif')
@@ -697,6 +852,14 @@ class WebODMPanel(QDockWidget):
         comp_dsm_path = os.path.join(out_dir, 'surface_model.tif')
         comp_dtm_path = os.path.join(out_dir, 'terrain_model.tif')
 
+
+        if self._cancelled:
+            root.removeChildNode(group)
+            self._lbl_run_status.setText('Cancelled.')
+            self._lbl_run_status.setStyleSheet('color: orange; font-size: 11px;')
+            self._set_running(False)
+            return
+
         # Surface Model (baked composite RGB)
         if self._chk_dsm.isChecked() and 'dsm' in abs_assets:
             if self._chk_hillshade.isChecked():
@@ -708,6 +871,14 @@ class WebODMPanel(QDockWidget):
                 if layer.isValid():
                     self._add_to_group(layer, group)
                 added.append('Surface Model')
+
+
+        if self._cancelled:
+            root.removeChildNode(group)
+            self._lbl_run_status.setText('Cancelled.')
+            self._lbl_run_status.setStyleSheet('color: orange; font-size: 11px;')
+            self._set_running(False)
+            return
 
         # Terrain Model (baked composite RGB)
         if 'dtm' in abs_assets:
@@ -739,6 +910,14 @@ class WebODMPanel(QDockWidget):
             if layer.isValid():
                 self._add_to_group(layer, group)
 
+
+        if self._cancelled:
+            root.removeChildNode(group)
+            self._lbl_run_status.setText('Cancelled.')
+            self._lbl_run_status.setStyleSheet('color: orange; font-size: 11px;')
+            self._set_running(False)
+            return
+
         # CHM
         if self._chk_chm.isChecked() and asset_detector.can_generate_chm(abs_assets):
             chm_path = os.path.join(out_dir, 'chm.tif')
@@ -749,14 +928,23 @@ class WebODMPanel(QDockWidget):
                 self._add_to_group(layer, group)
                 added.append('CHM')
 
+
+        if self._cancelled:
+            root.removeChildNode(group)
+            self._lbl_run_status.setText('Cancelled.')
+            self._lbl_run_status.setStyleSheet('color: orange; font-size: 11px;')
+            self._set_running(False)
+            return
+
         # Point Cloud (EPT preferred, LAZ fallback)
         pc_layer = None
         if self._chk_laz.isChecked():
             if 'ept' in abs_assets:
-                _step('Loading Point Cloud…')
+                self._update_status('Loading Point Cloud…')
                 ept_layer = QgsPointCloudLayer(abs_assets['ept'], 'Point Cloud', 'ept')
                 if ept_layer.isValid():
                     pc_layer = ept_layer
+                _step('Loading Point Cloud…')
 
         self._run_state = {
             'group': group, 'added': added, 'out_dir': out_dir,
@@ -768,29 +956,71 @@ class WebODMPanel(QDockWidget):
         if pc_layer:
             self._on_copc_done(None)
         elif self._run_state['laz']:
-            _step('Converting Point Cloud…')
-            self._start_copc_worker(abs_assets['laz'], out_dir)
+            msg = QMessageBox(self)
+            msg.setWindowTitle('Point Cloud')
+            msg.setText(
+                'Converting large LAS files may take a long time.\n'
+                'Do you want to continue?'
+            )
+            btn_continue = msg.addButton('Continue', QMessageBox.AcceptRole)
+            msg.addButton('Skip Point Cloud', QMessageBox.RejectRole)
+            msg.exec_()
+            if msg.clickedButton() == btn_continue:
+                _step('Converting Point Cloud…')
+                self._start_copc_worker(abs_assets['laz'], out_dir)
+            else:
+                self._on_copc_done(None)
         else:
             self._on_copc_done(None)
 
-    def _start_copc_worker(self, laz_val, out_dir):
+    def _start_copc_worker(self, laz_val, out_dir, on_done=None):
         las_paths = laz_val if isinstance(laz_val, list) else [laz_val]
         crs = self._crs_from_las(las_paths[0])
         pc_cache = os.path.join(out_dir, 'pc_cache')
         os.makedirs(pc_cache, exist_ok=True)
         base = 'merged' if len(las_paths) > 1 else os.path.splitext(os.path.basename(las_paths[0]))[0]
         copc_path = os.path.join(pc_cache, base + '.copc.laz')
-        self._run_state['crs'] = crs
+        callback = on_done if on_done is not None else self._on_copc_done
+        if on_done is None:
+            self._run_state['crs'] = crs
+        else:
+            self._load_state['crs'] = crs
 
         if os.path.isfile(copc_path):
-            self._on_copc_done(copc_path)
+            callback(copc_path)
             return
 
+        las_total_mb = sum(os.path.getsize(p) for p in las_paths if os.path.isfile(p)) / 1024 / 1024
+        self._copc_start_time = time.monotonic()
+        self._copc_las_mb = las_total_mb
+
+        self._copc_timer = QTimer(self)
+        def _tick():
+            elapsed = int(time.monotonic() - self._copc_start_time)
+            m, s = divmod(elapsed, 60)
+            self._update_status(
+                f"Converting Point Cloud… {las_total_mb:.0f} MB — {m}:{s:02d} elapsed"
+            )
+        self._copc_timer.timeout.connect(_tick)
+        self._copc_timer.start(1000)
+
         self._copc_worker = _CopcWorker(las_paths, copc_path, self)
-        self._copc_worker.finished.connect(self._on_copc_done)
+        self._copc_worker.finished.connect(callback)
         self._copc_worker.start()
 
     def _on_copc_done(self, copc_path):
+        # タイマー停止・処理速度を計算
+        if hasattr(self, '_copc_timer') and self._copc_timer.isActive():
+            self._copc_timer.stop()
+        elapsed = time.monotonic() - getattr(self, '_copc_start_time', time.monotonic())
+        las_mb = getattr(self, '_copc_las_mb', 0)
+        if elapsed > 0 and las_mb > 0:
+            speed = las_mb / (elapsed / 60)
+            em, es = divmod(int(elapsed), 60)
+            self._copc_speed_str = f"{las_mb:.0f} MB in {em}:{es:02d} — {speed:.0f} MB/min"
+        else:
+            self._copc_speed_str = ""
+
         state = self._run_state
         group = state['group']
         added = state['added']
@@ -798,13 +1028,21 @@ class WebODMPanel(QDockWidget):
         root = state['root']
         pc_layer = state.get('pc_layer')
 
+        if self._cancelled:
+            root.removeChildNode(group)
+            self._lbl_run_status.setText('Cancelled.')
+            self._lbl_run_status.setStyleSheet('color: orange; font-size: 11px;')
+            self._set_running(False)
+            return
+
         if copc_path:
             from qgis.core import QgsCoordinateReferenceSystem
-            state.get('step', lambda _: None)('Loading Point Cloud…')
+            self._update_status('Loading Point Cloud…')
             pc_layer = QgsPointCloudLayer(copc_path, 'Point Cloud', 'copc')
             crs = state.get('crs')
             if pc_layer.isValid() and crs and crs.isValid() and not pc_layer.crs().isValid():
                 pc_layer.setCrs(crs)
+            state.get('step', lambda _: None)('Loading Point Cloud…')
 
         if pc_layer and pc_layer.isValid():
             self._add_to_group(pc_layer, group)
@@ -813,7 +1051,11 @@ class WebODMPanel(QDockWidget):
         if added:
             group.setExpanded(True)
             self._save_meta(out_dir)
-            self._lbl_run_status.setText('Done: ' + ', '.join(added))
+            done_msg = 'Done: ' + ', '.join(added)
+            speed_str = getattr(self, '_copc_speed_str', '')
+            if speed_str:
+                done_msg += f'  |  {speed_str}'
+            self._lbl_run_status.setText(done_msg)
             self._lbl_run_status.setStyleSheet('color: green; font-size: 11px;')
             self._refresh_existing_combo()
         else:
@@ -822,3 +1064,33 @@ class WebODMPanel(QDockWidget):
             self._lbl_run_status.setStyleSheet('color: orange; font-size: 11px;')
 
         self._set_running(False)
+
+    def _on_load_copc_done(self, copc_path):
+        if hasattr(self, '_copc_timer') and self._copc_timer.isActive():
+            self._copc_timer.stop()
+        state = self._load_state
+        group = state['group']
+        added = state['added']
+        if copc_path:
+            crs = state.get('crs')
+            pc_layer = QgsPointCloudLayer(copc_path, 'Point Cloud', 'copc')
+            if pc_layer.isValid():
+                if crs and crs.isValid() and not pc_layer.crs().isValid():
+                    pc_layer.setCrs(crs)
+                self._add_to_group(pc_layer, group)
+                added.append('Point Cloud')
+        self._finish_load_existing(group, added)
+
+    def _finish_load_existing(self, group, added):
+        root = QgsProject.instance().layerTreeRoot()
+        if added:
+            group.setExpanded(True)
+            self._lbl_existing_status.setText('Loaded: ' + ', '.join(added))
+            self._lbl_existing_status.setStyleSheet(_note_style('green'))
+        else:
+            root.removeChildNode(group)
+            self._lbl_existing_status.setText('No valid layers found.')
+            self._lbl_existing_status.setStyleSheet(_note_style('orange'))
+        self._set_running(False)
+        self._lbl_run_status.setText('')
+        self._update_convert_laz_checkbox()
