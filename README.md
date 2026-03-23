@@ -57,6 +57,17 @@ Hillshade, composite models (Surface Model / Terrain Model), CHM, and vegetation
 
 Place the files in the structure above, then select the dataset folder via the **Load Existing** dropdown.
 
+> **Note — FOL (Forestry Operations Lite) VS Export**
+>
+> ZIPs exported from the Forestry Operations Lite plugin (Virtual Shizuoka data) are also supported.
+> In this format, LAS files are **not embedded** in the ZIP. Instead, the ZIP contains:
+>
+> - `las_sources.json` — relative paths from the ZIP to the LAS files on disk
+> - `README_LAS_LINKS.txt` — S3 download URLs for the LAS files (for reference)
+>
+> The LAS files must be present at the relative paths listed in `las_sources.json`.
+> If they have been moved or are unavailable, point cloud loading will be skipped.
+
 ## Layer order (in QGIS)
 
 | Layer | Description |
