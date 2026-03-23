@@ -48,7 +48,9 @@ def detect_from_zip(zip_path: str) -> dict:
     """ZIPを展開せずに資産を検出。{key: relative_path_in_zip}"""
     found = {}
     with zipfile.ZipFile(zip_path, 'r') as zf:
-        names = set(zf.namelist())
+        # ZIP spec は '/' 区切りだが Windows の zip ツールは '\' を使う場合がある。
+        # 比較用に正規化したセットを作成（格納は '/' 統一パス）
+        names = {n.replace('\\', '/') for n in zf.namelist()}
         for key, rel in ASSET_SPEC.items():
             if rel in names:
                 found[key] = rel

@@ -4,6 +4,7 @@ UI rules: one item per row; status/notes on the line below; columns where needed
 """
 
 import os
+import re
 import zipfile
 import hashlib
 import json
@@ -13,7 +14,7 @@ from qgis.PyQt.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QCheckBox, QFileDialog,
     QComboBox, QGroupBox, QProgressBar, QMessageBox,
 )
-from qgis.PyQt.QtCore import Qt, QThread, QTimer, pyqtSignal
+from qgis.PyQt.QtCore import Qt, QThread, QTimer, pyqtSignal, QEventLoop
 import time
 from qgis.core import QgsPointCloudLayer, QgsRasterLayer, QgsProject
 
@@ -38,8 +39,8 @@ class _CopcWorker(QThread):
                 return p
             try:
                 import ctypes
-                buf = ctypes.create_unicode_buffer(512)
-                ctypes.windll.kernel32.GetShortPathNameW(p, buf, 512)
+                buf = ctypes.create_unicode_buffer(1024)
+                ctypes.windll.kernel32.GetShortPathNameW(p, buf, 1024)
                 return buf.value or p
             except Exception:
                 return p
@@ -73,7 +74,7 @@ class _CopcWorker(QThread):
                 r = subprocess.run(
                     ['pdal', 'pipeline', '--stdin'],
                     input=json.dumps(pipeline),
-                    capture_output=True, text=True, encoding='utf-8', timeout=600,
+                    capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
                     creationflags=_win_flags,
                 )
                 if r.returncode == 0 and os.path.isfile(tmp_copc):
@@ -90,7 +91,7 @@ class _CopcWorker(QThread):
                     r2 = subprocess.run(
                         ['pdal', 'pipeline', '--stdin'],
                         input=json.dumps(pipeline_nosrs),
-                        capture_output=True, text=True, encoding='utf-8', timeout=600,
+                        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
                         creationflags=_win_flags,
                     )
                     if r2.returncode == 0 and os.path.isfile(tmp_copc):
@@ -118,7 +119,7 @@ class _CopcWorker(QThread):
                 r = subprocess.run(
                     ['pdal', 'pipeline', '--stdin'],
                     input=json.dumps(merge_pipeline),
-                    capture_output=True, text=True, encoding='utf-8', timeout=600,
+                    capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
                     creationflags=_win_flags,
                 )
                 if r.returncode != 0 or not os.path.isfile(tmp_las):
@@ -133,7 +134,7 @@ class _CopcWorker(QThread):
                 r = subprocess.run(
                     ['pdal', 'pipeline', '--stdin'],
                     input=json.dumps(copc_pipeline),
-                    capture_output=True, text=True, encoding='utf-8', timeout=600,
+                    capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
                     creationflags=_win_flags,
                 )
                 if r.returncode == 0 and os.path.isfile(tmp_copc):
@@ -375,7 +376,10 @@ class WebODMPanel(QDockWidget):
     def _group_name(self):
         src = self._src_edit.text()
         name = os.path.splitext(os.path.basename(src))[0]
-        return name.replace('-all', '').strip('-_')
+        name = name.replace('-all', '').strip('-_')
+        # Windows でフォルダ名に使えない文字 (<>:"/\|?* および制御文字) を除去
+        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name).rstrip('. ')
+        return name or 'import'
 
     def _resolve_output_dir(self, group_name):
         """Return unique output dir; appends _001, _002… if name already exists."""
@@ -475,8 +479,8 @@ class WebODMPanel(QDockWidget):
                 return p
             try:
                 import ctypes
-                buf = ctypes.create_unicode_buffer(512)
-                ctypes.windll.kernel32.GetShortPathNameW(p, buf, 512)
+                buf = ctypes.create_unicode_buffer(1024)
+                ctypes.windll.kernel32.GetShortPathNameW(p, buf, 1024)
                 return buf.value or p
             except Exception:
                 return p
@@ -504,7 +508,7 @@ class WebODMPanel(QDockWidget):
                 r = subprocess.run(
                     ['pdal', 'pipeline', '--stdin'],
                     input=json.dumps(pipeline),
-                    capture_output=True, text=True, encoding='utf-8', timeout=600,
+                    capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
                     creationflags=_win_flags,
                 )
                 if r.returncode == 0 and os.path.isfile(tmp_copc):
@@ -519,7 +523,7 @@ class WebODMPanel(QDockWidget):
                     r2 = subprocess.run(
                         ['pdal', 'pipeline', '--stdin'],
                         input=json.dumps(pipeline_nosrs),
-                        capture_output=True, text=True, encoding='utf-8', timeout=600,
+                        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
                         creationflags=_win_flags,
                     )
                     if r2.returncode == 0 and os.path.isfile(tmp_copc):
@@ -541,7 +545,7 @@ class WebODMPanel(QDockWidget):
                 r = subprocess.run(
                     ['pdal', 'pipeline', '--stdin'],
                     input=json.dumps(merge_pipeline),
-                    capture_output=True, text=True, encoding='utf-8', timeout=600,
+                    capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
                     creationflags=_win_flags,
                 )
                 if r.returncode == 0 and os.path.isfile(tmp_las):
@@ -552,7 +556,7 @@ class WebODMPanel(QDockWidget):
                     r = subprocess.run(
                         ['pdal', 'pipeline', '--stdin'],
                         input=json.dumps(copc_pipeline),
-                        capture_output=True, text=True, encoding='utf-8', timeout=600,
+                        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
                         creationflags=_win_flags,
                     )
                     if r.returncode == 0 and os.path.isfile(tmp_copc):
@@ -821,7 +825,7 @@ class WebODMPanel(QDockWidget):
     def _update_status(self, text):
         from qgis.PyQt.QtWidgets import QApplication
         self._lbl_run_status.setText(text)
-        QApplication.processEvents()
+        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
 
     def _run(self):
         base = self._output_base()
@@ -869,12 +873,15 @@ class WebODMPanel(QDockWidget):
         if self._is_zip:
             _step('Extracting ZIP…')
             with zipfile.ZipFile(self._source_path, 'r') as zf:
-                all_names = zf.namelist()
+                # ZIP spec は '/' 区切りだが Windows ツールは '\' を使う場合がある。
+                # 正規化名→元エントリ名のマップを作り、比較は '/' 統一で行い
+                # extract には元エントリ名を使うことで両方に対応する。
+                _entry_map = {n.replace('\\', '/'): n for n in zf.namelist()}
                 for key, rel in self._assets.items():
                     if key == 'ept':
-                        for name in all_names:
-                            if name.startswith('entwine_pointcloud/'):
-                                zf.extract(name, out_dir)
+                        for norm_name, orig_name in _entry_map.items():
+                            if norm_name.startswith('entwine_pointcloud/'):
+                                zf.extract(orig_name, out_dir)
                         abs_assets[key] = os.path.join(out_dir, rel)
                     elif isinstance(rel, list):
                         resolved = []
@@ -882,11 +889,11 @@ class WebODMPanel(QDockWidget):
                             if os.path.isabs(r):
                                 resolved.append(r)
                             else:
-                                zf.extract(r, out_dir)
+                                zf.extract(_entry_map.get(r, r), out_dir)
                                 resolved.append(os.path.join(out_dir, r))
                         abs_assets[key] = resolved
                     else:
-                        zf.extract(rel, out_dir)
+                        zf.extract(_entry_map.get(rel, rel), out_dir)
                         abs_assets[key] = os.path.join(out_dir, rel)
         else:
             abs_assets = self._assets
