@@ -61,6 +61,20 @@ def detect_from_zip(zip_path: str) -> dict:
             )
             if las_entries:
                 found['laz'] = las_entries
+        # las_sources.json による相対パス参照（FOL VS Export形式）
+        if 'laz' not in found and 'las_sources.json' in names:
+            import json
+            with zf.open('las_sources.json') as f:
+                sources = json.load(f)
+            zip_dir = os.path.dirname(zip_path)
+            las_paths = []
+            for entry in sources.get('las', []):
+                rel = entry.get('relative', '')
+                abs_path = os.path.normpath(os.path.join(zip_dir, rel))
+                if os.path.isfile(abs_path):
+                    las_paths.append(abs_path)
+            if las_paths:
+                found['laz'] = las_paths
     return found
 
 

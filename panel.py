@@ -20,7 +20,7 @@ from qgis.core import QgsPointCloudLayer, QgsRasterLayer, QgsProject
 
 class _CopcWorker(QThread):
     """PDAL による LAS → COPC 変換をバックグラウンドで実行する。"""
-    finished = pyqtSignal(str)  # copc_path（失敗時は空文字）
+    finished = pyqtSignal(str, str)  # (copc_path, error_msg)  失敗時は ('', エラー文字列)
 
     def __init__(self, las_paths, copc_path, parent=None):
         super().__init__(parent)
@@ -62,6 +62,8 @@ class _CopcWorker(QThread):
             if tmp_copc != copc_path and os.path.isfile(tmp_copc):
                 shutil.move(tmp_copc, copc_path)
 
+        _last_error = ''
+
         if len(las_paths) == 1:
             # 単一ファイルは直接 COPC 変換
             pipeline = {"pipeline": las_paths + [
@@ -76,10 +78,30 @@ class _CopcWorker(QThread):
                 )
                 if r.returncode == 0 and os.path.isfile(tmp_copc):
                     _finalize_copc()
-                    self.finished.emit(copc_path)
+                    self.finished.emit(copc_path, '')
                     return
-            except Exception:
-                pass
+                # フォールバック: Global Encoding WKT フラグ未設定の LAS 1.4 ファイル対策
+                if r.returncode != 0:
+                    _last_error = (r.stderr or '').strip()
+                    pipeline_nosrs = {"pipeline": [
+                        {"type": "readers.las", "filename": las_paths[0], "nosrs": True},
+                        {"type": "writers.copc", "filename": tmp_copc},
+                    ]}
+                    r2 = subprocess.run(
+                        ['pdal', 'pipeline', '--stdin'],
+                        input=json.dumps(pipeline_nosrs),
+                        capture_output=True, text=True, encoding='utf-8', timeout=600,
+                        creationflags=_win_flags,
+                    )
+                    if r2.returncode == 0 and os.path.isfile(tmp_copc):
+                        _finalize_copc()
+                        self.finished.emit(copc_path, '')
+                        return
+                    _last_error = (r2.stderr or _last_error or '').strip()
+            except subprocess.TimeoutExpired:
+                _last_error = 'TIMEOUT'
+            except Exception as e:
+                _last_error = str(e)
         else:
             # 複数ファイル: 一旦 LAS にマージしてから COPC 化
             # （PDAL writers.copc の複数入力でオクツリー中心がずれるバグを回避）
@@ -100,7 +122,8 @@ class _CopcWorker(QThread):
                     creationflags=_win_flags,
                 )
                 if r.returncode != 0 or not os.path.isfile(tmp_las):
-                    self.finished.emit('')
+                    _last_error = (r.stderr or '').strip()
+                    self.finished.emit('', _last_error)
                     return
 
                 copc_pipeline = {"pipeline": [
@@ -115,15 +138,18 @@ class _CopcWorker(QThread):
                 )
                 if r.returncode == 0 and os.path.isfile(tmp_copc):
                     _finalize_copc()
-                    self.finished.emit(copc_path)
+                    self.finished.emit(copc_path, '')
                     return
-            except Exception:
-                pass
+                _last_error = (r.stderr or '').strip()
+            except subprocess.TimeoutExpired:
+                _last_error = 'TIMEOUT'
+            except Exception as e:
+                _last_error = str(e)
             finally:
                 if os.path.isfile(tmp_las):
                     os.remove(tmp_las)
 
-        self.finished.emit('')
+        self.finished.emit('', _last_error)
 
 from . import asset_detector, processor
 
@@ -382,6 +408,34 @@ class WebODMPanel(QDockWidget):
             pass
         return None
 
+    def _crs_from_sibling_rasters(self, las_path):
+        """LAS と同じタスクフォルダ内のラスターファイルから CRS を取得する。
+        odm_georeferencing/ の親ディレクトリを起点に DSM → DTM → Orthophoto の順で確認する。"""
+        try:
+            from osgeo import gdal
+            from qgis.core import QgsCoordinateReferenceSystem
+            task_root = os.path.dirname(os.path.dirname(las_path))
+            candidates = [
+                os.path.join(task_root, 'odm_dem', 'dsm.tif'),
+                os.path.join(task_root, 'odm_dem', 'dtm.tif'),
+                os.path.join(task_root, 'odm_orthophoto', 'odm_orthophoto.tif'),
+            ]
+            for path in candidates:
+                if not os.path.isfile(path):
+                    continue
+                ds = gdal.Open(path)
+                if ds is None:
+                    continue
+                wkt = ds.GetProjection()
+                ds = None
+                if wkt:
+                    crs = QgsCoordinateReferenceSystem.fromWkt(wkt)
+                    if crs.isValid():
+                        return crs
+        except Exception:
+            pass
+        return None
+
     def _load_point_cloud(self, laz_val, out_dir):
         """LAS/LAZ をポイントクラウドレイヤーとして返す。複数ファイルは結合 COPC に変換する。"""
         las_paths = laz_val if isinstance(laz_val, list) else [laz_val]
@@ -450,12 +504,27 @@ class WebODMPanel(QDockWidget):
                 r = subprocess.run(
                     ['pdal', 'pipeline', '--stdin'],
                     input=json.dumps(pipeline),
-                    capture_output=True, text=True, encoding='utf-8', timeout=300,
+                    capture_output=True, text=True, encoding='utf-8', timeout=600,
                     creationflags=_win_flags,
                 )
                 if r.returncode == 0 and os.path.isfile(tmp_copc):
                     _finalize()
                     return copc_path
+                # フォールバック: Global Encoding WKT フラグ未設定の LAS 1.4 ファイル対策
+                if r.returncode != 0:
+                    pipeline_nosrs = {"pipeline": [
+                        {"type": "readers.las", "filename": safe_paths[0], "nosrs": True},
+                        {"type": "writers.copc", "filename": tmp_copc},
+                    ]}
+                    r2 = subprocess.run(
+                        ['pdal', 'pipeline', '--stdin'],
+                        input=json.dumps(pipeline_nosrs),
+                        capture_output=True, text=True, encoding='utf-8', timeout=600,
+                        creationflags=_win_flags,
+                    )
+                    if r2.returncode == 0 and os.path.isfile(tmp_copc):
+                        _finalize()
+                        return copc_path
             except Exception:
                 pass
         else:
@@ -472,7 +541,7 @@ class WebODMPanel(QDockWidget):
                 r = subprocess.run(
                     ['pdal', 'pipeline', '--stdin'],
                     input=json.dumps(merge_pipeline),
-                    capture_output=True, text=True, encoding='utf-8', timeout=300,
+                    capture_output=True, text=True, encoding='utf-8', timeout=600,
                     creationflags=_win_flags,
                 )
                 if r.returncode == 0 and os.path.isfile(tmp_las):
@@ -483,7 +552,7 @@ class WebODMPanel(QDockWidget):
                     r = subprocess.run(
                         ['pdal', 'pipeline', '--stdin'],
                         input=json.dumps(copc_pipeline),
-                        capture_output=True, text=True, encoding='utf-8', timeout=300,
+                        capture_output=True, text=True, encoding='utf-8', timeout=600,
                         creationflags=_win_flags,
                     )
                     if r.returncode == 0 and os.path.isfile(tmp_copc):
@@ -714,7 +783,8 @@ class WebODMPanel(QDockWidget):
             msg.setWindowTitle('Point Cloud')
             msg.setText(
                 'Converting large LAS files may take a long time.\n'
-                'Do you want to continue?'
+                'Do you want to continue?\n'
+                '※ Conversion will be terminated if it does not complete within 10 minutes.'
             )
             btn_continue = msg.addButton('Continue', QMessageBox.AcceptRole)
             msg.addButton('Skip LAS Conversion', QMessageBox.RejectRole)
@@ -807,9 +877,14 @@ class WebODMPanel(QDockWidget):
                                 zf.extract(name, out_dir)
                         abs_assets[key] = os.path.join(out_dir, rel)
                     elif isinstance(rel, list):
+                        resolved = []
                         for r in rel:
-                            zf.extract(r, out_dir)
-                        abs_assets[key] = [os.path.join(out_dir, r) for r in rel]
+                            if os.path.isabs(r):
+                                resolved.append(r)
+                            else:
+                                zf.extract(r, out_dir)
+                                resolved.append(os.path.join(out_dir, r))
+                        abs_assets[key] = resolved
                     else:
                         zf.extract(rel, out_dir)
                         abs_assets[key] = os.path.join(out_dir, rel)
@@ -954,13 +1029,14 @@ class WebODMPanel(QDockWidget):
         }
 
         if pc_layer:
-            self._on_copc_done(None)
+            self._on_copc_done(None, '')
         elif self._run_state['laz']:
             msg = QMessageBox(self)
             msg.setWindowTitle('Point Cloud')
             msg.setText(
                 'Converting large LAS files may take a long time.\n'
-                'Do you want to continue?'
+                'Do you want to continue?\n'
+                '※ Conversion will be terminated if it does not complete within 10 minutes.'
             )
             btn_continue = msg.addButton('Continue', QMessageBox.AcceptRole)
             msg.addButton('Skip Point Cloud', QMessageBox.RejectRole)
@@ -969,13 +1045,16 @@ class WebODMPanel(QDockWidget):
                 _step('Converting Point Cloud…')
                 self._start_copc_worker(abs_assets['laz'], out_dir)
             else:
-                self._on_copc_done(None)
+                self._on_copc_done(None, '')
         else:
-            self._on_copc_done(None)
+            self._on_copc_done(None, '')
 
     def _start_copc_worker(self, laz_val, out_dir, on_done=None):
         las_paths = laz_val if isinstance(laz_val, list) else [laz_val]
         crs = self._crs_from_las(las_paths[0])
+        # LAS に CRS がない場合は同フォルダの DSM/DTM/Orthophoto から取得
+        if crs is None or not crs.isValid():
+            crs = self._crs_from_sibling_rasters(las_paths[0])
         pc_cache = os.path.join(out_dir, 'pc_cache')
         os.makedirs(pc_cache, exist_ok=True)
         base = 'merged' if len(las_paths) > 1 else os.path.splitext(os.path.basename(las_paths[0]))[0]
@@ -987,7 +1066,7 @@ class WebODMPanel(QDockWidget):
             self._load_state['crs'] = crs
 
         if os.path.isfile(copc_path):
-            callback(copc_path)
+            callback(copc_path, '')
             return
 
         las_total_mb = sum(os.path.getsize(p) for p in las_paths if os.path.isfile(p)) / 1024 / 1024
@@ -1008,7 +1087,7 @@ class WebODMPanel(QDockWidget):
         self._copc_worker.finished.connect(callback)
         self._copc_worker.start()
 
-    def _on_copc_done(self, copc_path):
+    def _on_copc_done(self, copc_path, error=''):
         # タイマー停止・処理速度を計算
         if hasattr(self, '_copc_timer') and self._copc_timer.isActive():
             self._copc_timer.stop()
@@ -1043,6 +1122,13 @@ class WebODMPanel(QDockWidget):
             if pc_layer.isValid() and crs and crs.isValid() and not pc_layer.crs().isValid():
                 pc_layer.setCrs(crs)
             state.get('step', lambda _: None)('Loading Point Cloud…')
+        elif error:
+            if error == 'TIMEOUT':
+                err_msg = 'Point Cloud 変換タイムアウト（10分超過）。ファイルが大きすぎる可能性があります。'
+            else:
+                err_msg = f'Point Cloud 変換失敗: {error[:200]}'
+            self._lbl_run_status.setText(err_msg)
+            self._lbl_run_status.setStyleSheet('color: red; font-size: 11px;')
 
         if pc_layer and pc_layer.isValid():
             self._add_to_group(pc_layer, group)
@@ -1055,17 +1141,21 @@ class WebODMPanel(QDockWidget):
             speed_str = getattr(self, '_copc_speed_str', '')
             if speed_str:
                 done_msg += f'  |  {speed_str}'
+            if not copc_path and error:
+                done_msg += '  ※ Point Cloud は失敗'
             self._lbl_run_status.setText(done_msg)
             self._lbl_run_status.setStyleSheet('color: green; font-size: 11px;')
             self._refresh_existing_combo()
-        else:
+        elif not error:
             root.removeChildNode(group)
             self._lbl_run_status.setText('No layers added.')
             self._lbl_run_status.setStyleSheet('color: orange; font-size: 11px;')
+        else:
+            root.removeChildNode(group)
 
         self._set_running(False)
 
-    def _on_load_copc_done(self, copc_path):
+    def _on_load_copc_done(self, copc_path, error=''):
         if hasattr(self, '_copc_timer') and self._copc_timer.isActive():
             self._copc_timer.stop()
         state = self._load_state
@@ -1079,6 +1169,13 @@ class WebODMPanel(QDockWidget):
                     pc_layer.setCrs(crs)
                 self._add_to_group(pc_layer, group)
                 added.append('Point Cloud')
+        elif error:
+            if error == 'TIMEOUT':
+                err_msg = 'Point Cloud 変換タイムアウト（10分超過）'
+            else:
+                err_msg = f'Point Cloud 変換失敗: {error[:200]}'
+            self._lbl_existing_status.setText(err_msg)
+            self._lbl_existing_status.setStyleSheet(_note_style('red'))
         self._finish_load_existing(group, added)
 
     def _finish_load_existing(self, group, added):
