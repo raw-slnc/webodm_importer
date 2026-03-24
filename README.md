@@ -156,16 +156,16 @@ If the ZIP contains only LAS/LAZ files (no EPT), the plugin attempts to load the
 Installing the `pdal` CLI is recommended on Linux, where the QGIS PDAL provider may not be included in standard packages.
 If `pdal` is not installed and direct loading fails, the point cloud layer is silently skipped.
 
-## License
-
-This plugin is distributed under the GNU General Public License v2 or later.
-See [LICENSE](LICENSE) for details.
-
 ## Support
 
 If this plugin is helpful for your work, you can support the development here:
 https://paypal.me/rawslnc
 
+## License
+
+This plugin is distributed under the GNU General Public License v2 or later.
+See [LICENSE](LICENSE) for details.
+
 ## Author
 
-(C) 2026 by Hideharu Masai
+Copyright (C) 2026 Hideharu Masai
