@@ -16,7 +16,7 @@ from qgis.PyQt.QtWidgets import (
 )
 from qgis.PyQt.QtCore import Qt, QThread, QTimer, pyqtSignal, QEventLoop
 import time
-from qgis.core import QgsPointCloudLayer, QgsRasterLayer, QgsProject
+from qgis.core import QgsPointCloudLayer, QgsRasterLayer, QgsProject, QgsMessageLog, Qgis
 
 
 class _CopcWorker(QThread):
@@ -29,9 +29,11 @@ class _CopcWorker(QThread):
         self._copc_path = copc_path
 
     def run(self):
-        import subprocess, json, sys, shutil, uuid
+        import subprocess, json, sys, shutil, uuid, tempfile
 
         copc_path = self._copc_path
+        _uid = uuid.uuid4().hex[:8]
+        _tmp_inputs = []  # Windows: 一時ハードリンク/コピーの管理
 
         def _short(p):
             """Windows: 日本語パスを 8.3 形式に変換して PDAL に渡す。"""
@@ -45,18 +47,37 @@ class _CopcWorker(QThread):
             except Exception:
                 return p
 
+        def _safe_input(p, idx):
+            """ASCII-safe な入力パスを返す。8.3 変換失敗時はハードリンク（同ドライブ）またはコピーで回避。"""
+            short = _short(p)
+            if sys.platform != 'win32' or all(ord(c) < 128 for c in short):
+                return short
+            ext = os.path.splitext(p)[1].lower()
+            dst = os.path.join(tempfile.gettempdir(), f'pdal_in_{_uid}_{idx}{ext}')
+            try:
+                os.link(p, dst)
+            except OSError:
+                shutil.copy2(p, dst)
+            _tmp_inputs.append(dst)
+            return dst
+
+        def _cleanup():
+            for f in _tmp_inputs:
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+
         # Windows: コマンドプロンプトウィンドウを開かない
         _win_flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
 
         # Windows: 出力先に ASCII 一時パスを使い、完了後に本来のパスへリネーム
         if sys.platform == 'win32':
-            import tempfile
-            _uid = uuid.uuid4().hex[:8]
             tmp_copc = os.path.join(tempfile.gettempdir(), f'pdal_tmp_{_uid}.copc.laz')
         else:
             tmp_copc = copc_path
 
-        las_paths = [_short(p) for p in self._las_paths]
+        las_paths = [_safe_input(p, i) for i, p in enumerate(self._las_paths)]
 
         def _finalize_copc():
             """tmp_copc → copc_path へ移動（Windows のみ）。"""
@@ -79,6 +100,7 @@ class _CopcWorker(QThread):
                 )
                 if r.returncode == 0 and os.path.isfile(tmp_copc):
                     _finalize_copc()
+                    _cleanup()
                     self.finished.emit(copc_path, '')
                     return
                 # フォールバック: Global Encoding WKT フラグ未設定の LAS 1.4 ファイル対策
@@ -96,6 +118,7 @@ class _CopcWorker(QThread):
                     )
                     if r2.returncode == 0 and os.path.isfile(tmp_copc):
                         _finalize_copc()
+                        _cleanup()
                         self.finished.emit(copc_path, '')
                         return
                     _last_error = (r2.stderr or _last_error or '').strip()
@@ -107,7 +130,6 @@ class _CopcWorker(QThread):
             # 複数ファイル: 一旦 LAS にマージしてから COPC 化
             # （PDAL writers.copc の複数入力でオクツリー中心がずれるバグを回避）
             if sys.platform == 'win32':
-                import tempfile
                 tmp_las = os.path.join(tempfile.gettempdir(), f'pdal_tmp_{_uid}.las')
             else:
                 tmp_las = copc_path + '.tmp.las'
@@ -124,6 +146,7 @@ class _CopcWorker(QThread):
                 )
                 if r.returncode != 0 or not os.path.isfile(tmp_las):
                     _last_error = (r.stderr or '').strip()
+                    _cleanup()
                     self.finished.emit('', _last_error)
                     return
 
@@ -139,6 +162,7 @@ class _CopcWorker(QThread):
                 )
                 if r.returncode == 0 and os.path.isfile(tmp_copc):
                     _finalize_copc()
+                    _cleanup()
                     self.finished.emit(copc_path, '')
                     return
                 _last_error = (r.stderr or '').strip()
@@ -150,6 +174,7 @@ class _CopcWorker(QThread):
                 if os.path.isfile(tmp_las):
                     os.remove(tmp_las)
 
+        _cleanup()
         self.finished.emit('', _last_error)
 
 from . import asset_detector, processor
@@ -465,7 +490,7 @@ class WebODMPanel(QDockWidget):
 
     def _convert_to_copc(self, las_paths, out_dir):
         """PDAL CLI で LAS/LAZ（単数または複数）→ COPC 変換。変換済みなら再利用する。"""
-        import subprocess, json, sys, shutil, uuid
+        import subprocess, json, sys, shutil, uuid, tempfile
         las_paths = las_paths if isinstance(las_paths, list) else [las_paths]
         pc_cache = os.path.join(out_dir, 'pc_cache')
         os.makedirs(pc_cache, exist_ok=True)
@@ -473,6 +498,9 @@ class WebODMPanel(QDockWidget):
         copc_path = os.path.join(pc_cache, base + '.copc.laz')
         if os.path.isfile(copc_path):
             return copc_path
+
+        _uid = uuid.uuid4().hex[:8]
+        _tmp_inputs = []
 
         def _short(p):
             if sys.platform != 'win32':
@@ -485,16 +513,34 @@ class WebODMPanel(QDockWidget):
             except Exception:
                 return p
 
+        def _safe_input(p, idx):
+            short = _short(p)
+            if sys.platform != 'win32' or all(ord(c) < 128 for c in short):
+                return short
+            ext = os.path.splitext(p)[1].lower()
+            dst = os.path.join(tempfile.gettempdir(), f'pdal_in_{_uid}_{idx}{ext}')
+            try:
+                os.link(p, dst)
+            except OSError:
+                shutil.copy2(p, dst)
+            _tmp_inputs.append(dst)
+            return dst
+
+        def _cleanup():
+            for f in _tmp_inputs:
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+
         _win_flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
 
         if sys.platform == 'win32':
-            import tempfile
-            _uid = uuid.uuid4().hex[:8]
             tmp_copc = os.path.join(tempfile.gettempdir(), f'pdal_tmp_{_uid}.copc.laz')
         else:
             tmp_copc = copc_path
 
-        safe_paths = [_short(p) for p in las_paths]
+        safe_paths = [_safe_input(p, i) for i, p in enumerate(las_paths)]
 
         def _finalize():
             if tmp_copc != copc_path and os.path.isfile(tmp_copc):
@@ -513,6 +559,7 @@ class WebODMPanel(QDockWidget):
                 )
                 if r.returncode == 0 and os.path.isfile(tmp_copc):
                     _finalize()
+                    _cleanup()
                     return copc_path
                 # フォールバック: Global Encoding WKT フラグ未設定の LAS 1.4 ファイル対策
                 if r.returncode != 0:
@@ -528,12 +575,12 @@ class WebODMPanel(QDockWidget):
                     )
                     if r2.returncode == 0 and os.path.isfile(tmp_copc):
                         _finalize()
+                        _cleanup()
                         return copc_path
             except Exception:
                 pass
         else:
             if sys.platform == 'win32':
-                import tempfile
                 tmp_las = os.path.join(tempfile.gettempdir(), f'pdal_tmp_{_uid}.las')
             else:
                 tmp_las = copc_path + '.tmp.las'
@@ -561,12 +608,14 @@ class WebODMPanel(QDockWidget):
                     )
                     if r.returncode == 0 and os.path.isfile(tmp_copc):
                         _finalize()
+                        _cleanup()
                         return copc_path
             except Exception:
                 pass
             finally:
                 if os.path.isfile(tmp_las):
                     os.remove(tmp_las)
+        _cleanup()
         return None
 
     def _add_to_group(self, layer, group):
@@ -1134,6 +1183,7 @@ class WebODMPanel(QDockWidget):
                 err_msg = 'Point Cloud 変換タイムアウト（10分超過）。ファイルが大きすぎる可能性があります。'
             else:
                 err_msg = f'Point Cloud 変換失敗: {error[:200]}'
+            QgsMessageLog.logMessage(f'webodm_importer PDAL error:\n{error}', 'webodm_importer', Qgis.Warning)
             self._lbl_run_status.setText(err_msg)
             self._lbl_run_status.setStyleSheet('color: red; font-size: 11px;')
 
@@ -1181,6 +1231,7 @@ class WebODMPanel(QDockWidget):
                 err_msg = 'Point Cloud 変換タイムアウト（10分超過）'
             else:
                 err_msg = f'Point Cloud 変換失敗: {error[:200]}'
+            QgsMessageLog.logMessage(f'webodm_importer PDAL error:\n{error}', 'webodm_importer', Qgis.Warning)
             self._lbl_existing_status.setText(err_msg)
             self._lbl_existing_status.setStyleSheet(_note_style('red'))
         self._finish_load_existing(group, added)
