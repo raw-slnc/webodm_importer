@@ -71,7 +71,7 @@ def detect_from_zip(zip_path: str) -> dict:
             zip_dir = os.path.dirname(zip_path)
             las_paths = []
             for entry in sources.get('las', []):
-                rel = entry.get('relative', '')
+                rel = entry.get('relative', '').replace('\\', '/')
                 abs_path = os.path.normpath(os.path.join(zip_dir, rel))
                 if os.path.isfile(abs_path):
                     las_paths.append(abs_path)

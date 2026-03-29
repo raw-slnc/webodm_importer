@@ -22,7 +22,7 @@ repository=https://github.com/raw-slnc/webodm_importer
 
 hasProcessingProvider=no
 changelog=
-    0.2.3 - Fix LAS to COPC conversion failure on Windows environments where NTFS 8.3 name generation is disabled: fall back to ASCII hardlink (or copy) for non-ASCII input paths; add PDAL error logging to QGIS message log
+    0.2.3 - Fix LAS to COPC conversion failure on Windows environments where NTFS 8.3 name generation is disabled: fall back to ASCII hardlink (or copy) for non-ASCII input paths; add PDAL error logging to QGIS message log; fix las_sources.json relative paths with Windows backslashes not resolving on Linux
     0.2.2 - Fix Windows-specific issues: sanitize forbidden characters in output folder names; normalize ZIP entry separators; add errors=replace to PDAL subprocess encoding; increase GetShortPathNameW buffer size; use ExcludeUserInputEvents in processEvents to prevent access violation on layer load
     0.2.1 - Forestry Operations Lite (FOL) Virtual Shizuoka export support: read las_sources.json (relative paths to LAS) instead of copied/symlinked files; handle absolute LAS paths on extraction; extend PDAL conversion timeout to 600s (10 min); add timeout notice to point cloud conversion dialog
     0.2.0 - Stop button to cancel processing; Convert LAS to COPC checkbox in Load Existing with async progress display; confirmation dialog before point cloud conversion; button width adjustments
