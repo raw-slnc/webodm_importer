@@ -27,9 +27,43 @@ class _CopcWorker(QThread):
         super().__init__(parent)
         self._las_paths = las_paths
         self._copc_path = copc_path
+        self._cancelled = False
+        self._proc = None
+
+    def cancel(self):
+        self._cancelled = True
+        proc = self._proc
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:  # nosec B110
+                pass
+
+    def _pdal(self, pipeline_json, win_flags):
+        """pdal pipeline を実行し (returncode, stderr) を返す。
+        キャンセル時は (None, '')、タイムアウト時は ('TIMEOUT', '') を返す。"""
+        import subprocess  # nosec B404
+        proc = subprocess.Popen(  # nosec B603, B607
+            ['pdal', 'pipeline', '--stdin'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding='utf-8', errors='replace',
+            creationflags=win_flags,
+        )
+        self._proc = proc
+        try:
+            _, err = proc.communicate(input=pipeline_json, timeout=600)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            self._proc = None
+            return 'TIMEOUT', ''
+        self._proc = None
+        if self._cancelled:
+            return None, ''
+        return proc.returncode, (err or '').strip()
 
     def run(self):
-        import subprocess, json, sys, shutil, uuid, tempfile
+        import subprocess, json, sys, shutil, uuid, tempfile  # nosec B404
 
         copc_path = self._copc_path
         _uid = uuid.uuid4().hex[:8]
@@ -91,41 +125,27 @@ class _CopcWorker(QThread):
             pipeline = {"pipeline": las_paths + [
                 {"type": "writers.copc", "filename": tmp_copc},
             ]}
-            try:
-                r = subprocess.run(
-                    ['pdal', 'pipeline', '--stdin'],
-                    input=json.dumps(pipeline),
-                    capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
-                    creationflags=_win_flags,
-                )
-                if r.returncode == 0 and os.path.isfile(tmp_copc):
-                    _finalize_copc()
-                    _cleanup()
-                    self.finished.emit(copc_path, '')
-                    return
-                # フォールバック: Global Encoding WKT フラグ未設定の LAS 1.4 ファイル対策
-                if r.returncode != 0:
-                    _last_error = (r.stderr or '').strip()
-                    pipeline_nosrs = {"pipeline": [
-                        {"type": "readers.las", "filename": las_paths[0], "nosrs": True},
-                        {"type": "writers.copc", "filename": tmp_copc},
-                    ]}
-                    r2 = subprocess.run(
-                        ['pdal', 'pipeline', '--stdin'],
-                        input=json.dumps(pipeline_nosrs),
-                        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
-                        creationflags=_win_flags,
-                    )
-                    if r2.returncode == 0 and os.path.isfile(tmp_copc):
-                        _finalize_copc()
-                        _cleanup()
-                        self.finished.emit(copc_path, '')
-                        return
-                    _last_error = (r2.stderr or _last_error or '').strip()
-            except subprocess.TimeoutExpired:
-                _last_error = 'TIMEOUT'
-            except Exception as e:
-                _last_error = str(e)
+            rc, err = self._pdal(json.dumps(pipeline), _win_flags)
+            if rc is None:
+                _cleanup(); self.finished.emit('', 'CANCELLED'); return
+            if rc == 'TIMEOUT':
+                _cleanup(); self.finished.emit('', 'TIMEOUT'); return
+            if rc == 0 and os.path.isfile(tmp_copc):
+                _finalize_copc(); _cleanup(); self.finished.emit(copc_path, ''); return
+            # フォールバック: Global Encoding WKT フラグ未設定の LAS 1.4 ファイル対策
+            _last_error = err
+            pipeline_nosrs = {"pipeline": [
+                {"type": "readers.las", "filename": las_paths[0], "nosrs": True},
+                {"type": "writers.copc", "filename": tmp_copc},
+            ]}
+            rc2, err2 = self._pdal(json.dumps(pipeline_nosrs), _win_flags)
+            if rc2 is None:
+                _cleanup(); self.finished.emit('', 'CANCELLED'); return
+            if rc2 == 'TIMEOUT':
+                _cleanup(); self.finished.emit('', 'TIMEOUT'); return
+            if rc2 == 0 and os.path.isfile(tmp_copc):
+                _finalize_copc(); _cleanup(); self.finished.emit(copc_path, ''); return
+            _last_error = err2 or _last_error
         else:
             # 複数ファイル: 一旦 LAS にマージしてから COPC 化
             # （PDAL writers.copc の複数入力でオクツリー中心がずれるバグを回避）
@@ -138,38 +158,27 @@ class _CopcWorker(QThread):
                     {"type": "filters.merge"},
                     {"type": "writers.las", "filename": tmp_las},
                 ]}
-                r = subprocess.run(
-                    ['pdal', 'pipeline', '--stdin'],
-                    input=json.dumps(merge_pipeline),
-                    capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
-                    creationflags=_win_flags,
-                )
-                if r.returncode != 0 or not os.path.isfile(tmp_las):
-                    _last_error = (r.stderr or '').strip()
-                    _cleanup()
-                    self.finished.emit('', _last_error)
-                    return
-
-                copc_pipeline = {"pipeline": [
-                    tmp_las,
-                    {"type": "writers.copc", "filename": tmp_copc},
-                ]}
-                r = subprocess.run(
-                    ['pdal', 'pipeline', '--stdin'],
-                    input=json.dumps(copc_pipeline),
-                    capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
-                    creationflags=_win_flags,
-                )
-                if r.returncode == 0 and os.path.isfile(tmp_copc):
-                    _finalize_copc()
-                    _cleanup()
-                    self.finished.emit(copc_path, '')
-                    return
-                _last_error = (r.stderr or '').strip()
-            except subprocess.TimeoutExpired:
-                _last_error = 'TIMEOUT'
-            except Exception as e:
-                _last_error = str(e)
+                rc, err = self._pdal(json.dumps(merge_pipeline), _win_flags)
+                if rc is None:
+                    self.finished.emit('', 'CANCELLED'); return
+                if rc == 'TIMEOUT':
+                    _last_error = 'TIMEOUT'
+                elif rc != 0 or not os.path.isfile(tmp_las):
+                    _last_error = err
+                else:
+                    copc_pipeline = {"pipeline": [
+                        tmp_las,
+                        {"type": "writers.copc", "filename": tmp_copc},
+                    ]}
+                    rc2, err2 = self._pdal(json.dumps(copc_pipeline), _win_flags)
+                    if rc2 is None:
+                        self.finished.emit('', 'CANCELLED'); return
+                    if rc2 == 'TIMEOUT':
+                        _last_error = 'TIMEOUT'
+                    elif rc2 == 0 and os.path.isfile(tmp_copc):
+                        _finalize_copc(); _cleanup(); self.finished.emit(copc_path, ''); return
+                    else:
+                        _last_error = err2
             finally:
                 if os.path.isfile(tmp_las):
                     os.remove(tmp_las)
@@ -366,7 +375,7 @@ class WebODMPanel(QDockWidget):
         """ソースZIPの先頭2MBからMD5ハッシュを生成する（フォルダ時は空文字）。"""
         if not self._is_zip or not self._source_path:
             return ''
-        h = hashlib.md5()
+        h = hashlib.md5(usedforsecurity=False)
         with open(self._source_path, 'rb') as f:
             h.update(f.read(2 * 1024 * 1024))
         return h.hexdigest()
@@ -382,6 +391,19 @@ class WebODMPanel(QDockWidget):
             return ''
         with open(meta_path) as f:
             return json.load(f).get('hash', '')
+
+    def _find_duplicate_import(self, base: str, group_name: str) -> bool:
+        """base 以下の同名フォルダ（連番バリアント含む）にハッシュ一致の import があれば True。"""
+        src_hash = self._source_hash()
+        if not src_hash or not os.path.isdir(base):
+            return False
+        pattern = re.compile(rf'^{re.escape(group_name)}(_\d{{3}})?$')
+        for entry in os.listdir(base):
+            if pattern.match(entry):
+                folder = os.path.join(base, entry)
+                if os.path.isdir(folder) and self._load_meta_hash(folder) == src_hash:
+                    return True
+        return False
 
     def _short_path(self, full_path: str) -> str:
         """プロジェクトフォルダの親までを … に省略して返す。"""
@@ -433,7 +455,7 @@ class WebODMPanel(QDockWidget):
             wkt = crs.to_wkt()
             if wkt:
                 return QgsCoordinateReferenceSystem.fromWkt(wkt)
-        except Exception:
+        except Exception:  # nosec B110
             pass
         return None
 
@@ -461,7 +483,7 @@ class WebODMPanel(QDockWidget):
                     crs = QgsCoordinateReferenceSystem.fromWkt(wkt)
                     if crs.isValid():
                         return crs
-        except Exception:
+        except Exception:  # nosec B110
             pass
         return None
 
@@ -490,7 +512,7 @@ class WebODMPanel(QDockWidget):
 
     def _convert_to_copc(self, las_paths, out_dir):
         """PDAL CLI で LAS/LAZ（単数または複数）→ COPC 変換。変換済みなら再利用する。"""
-        import subprocess, json, sys, shutil, uuid, tempfile
+        import subprocess, json, sys, shutil, uuid, tempfile  # nosec B404
         las_paths = las_paths if isinstance(las_paths, list) else [las_paths]
         pc_cache = os.path.join(out_dir, 'pc_cache')
         os.makedirs(pc_cache, exist_ok=True)
@@ -551,7 +573,7 @@ class WebODMPanel(QDockWidget):
                 {"type": "writers.copc", "filename": tmp_copc},
             ]}
             try:
-                r = subprocess.run(
+                r = subprocess.run(  # nosec B603, B607
                     ['pdal', 'pipeline', '--stdin'],
                     input=json.dumps(pipeline),
                     capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
@@ -567,7 +589,7 @@ class WebODMPanel(QDockWidget):
                         {"type": "readers.las", "filename": safe_paths[0], "nosrs": True},
                         {"type": "writers.copc", "filename": tmp_copc},
                     ]}
-                    r2 = subprocess.run(
+                    r2 = subprocess.run(  # nosec B603, B607
                         ['pdal', 'pipeline', '--stdin'],
                         input=json.dumps(pipeline_nosrs),
                         capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
@@ -577,7 +599,7 @@ class WebODMPanel(QDockWidget):
                         _finalize()
                         _cleanup()
                         return copc_path
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         else:
             if sys.platform == 'win32':
@@ -589,7 +611,7 @@ class WebODMPanel(QDockWidget):
                     {"type": "filters.merge"},
                     {"type": "writers.las", "filename": tmp_las},
                 ]}
-                r = subprocess.run(
+                r = subprocess.run(  # nosec B603, B607
                     ['pdal', 'pipeline', '--stdin'],
                     input=json.dumps(merge_pipeline),
                     capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
@@ -600,7 +622,7 @@ class WebODMPanel(QDockWidget):
                         tmp_las,
                         {"type": "writers.copc", "filename": tmp_copc},
                     ]}
-                    r = subprocess.run(
+                    r = subprocess.run(  # nosec B603, B607
                         ['pdal', 'pipeline', '--stdin'],
                         input=json.dumps(copc_pipeline),
                         capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
@@ -610,7 +632,7 @@ class WebODMPanel(QDockWidget):
                         _finalize()
                         _cleanup()
                         return copc_path
-            except Exception:
+            except Exception:  # nosec B110
                 pass
             finally:
                 if os.path.isfile(tmp_las):
@@ -867,8 +889,7 @@ class WebODMPanel(QDockWidget):
         self._btn_stop.setEnabled(False)
         self._update_status('Cancelling…')
         if hasattr(self, '_copc_worker') and self._copc_worker.isRunning():
-            self._copc_worker.terminate()
-            self._copc_worker.wait(3000)
+            self._copc_worker.cancel()
 
 
     def _update_status(self, text):
@@ -885,13 +906,11 @@ class WebODMPanel(QDockWidget):
             return
 
         group_name = self._group_name()
-        existing = os.path.join(base, group_name)
-        if os.path.isdir(existing) and self._is_zip:
-            if self._source_hash() == self._load_meta_hash(existing):
-                self._lbl_run_status.setText(
-                    f'Already imported: {group_name}\nUse Load Existing to reload.')
-                self._lbl_run_status.setStyleSheet('color: orange; font-size: 11px;')
-                return
+        if self._is_zip and self._find_duplicate_import(base, group_name):
+            self._lbl_run_status.setText(
+                f'Already imported: {group_name}\nUse Load Existing to reload.')
+            self._lbl_run_status.setStyleSheet('color: orange; font-size: 11px;')
+            return
 
         out_dir = self._resolve_output_dir(group_name)
         os.makedirs(out_dir, exist_ok=True)
