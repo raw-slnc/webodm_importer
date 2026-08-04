@@ -3,6 +3,7 @@ Processing pipeline: raster generation and styling.
 """
 
 import os
+
 import processing
 import numpy as np
 from osgeo import gdal
@@ -26,9 +27,6 @@ _ELEV_RAMP = [
 
 def generate_chm(dsm_path: str, dtm_path: str, output_path: str) -> str:
     """CHM = DSM - DTM。DSM を DTM グリッドに合わせてから演算する。"""
-    from osgeo import gdal
-    import os
-
     dtm_ds = gdal.Open(dtm_path)
     gt = dtm_ds.GetGeoTransform()
     xmin = gt[0]
@@ -108,8 +106,6 @@ def generate_hillshade(dtm_path: str, output_path: str) -> str:
     })
     return output_path
 
-
-
 def render_elevation_composite(elev_path: str, hs_path: str, output_path: str) -> str:
     """Bake elevation color ramp + hillshade (Multiply 70%) into a single RGB GeoTIFF."""
     ds_elev = gdal.Open(elev_path)
@@ -163,8 +159,6 @@ def render_elevation_composite(elev_path: str, hs_path: str, output_path: str) -
     ds_out = ds_hs = ds_elev = None
     return output_path
 
-
-
 def apply_vegetation_style(layer: QgsRasterLayer) -> None:
     """Red → white → green ramp for VARI index."""
     lo, hi = -1.0, 1.0
@@ -173,9 +167,9 @@ def apply_vegetation_style(layer: QgsRasterLayer) -> None:
     ramp.setColorRampItemList([
         QgsColorRampShader.ColorRampItem(-1.0, QColor('#d73027')),
         QgsColorRampShader.ColorRampItem(-0.1, QColor('#fc8d59')),
-        QgsColorRampShader.ColorRampItem( 0.0, QColor('#ffffbf')),
-        QgsColorRampShader.ColorRampItem( 0.2, QColor('#91cf60')),
-        QgsColorRampShader.ColorRampItem( 1.0, QColor('#1a9641')),
+        QgsColorRampShader.ColorRampItem(0.0, QColor('#ffffbf')),
+        QgsColorRampShader.ColorRampItem(0.2, QColor('#91cf60')),
+        QgsColorRampShader.ColorRampItem(1.0, QColor('#1a9641')),
     ])
     shader = QgsRasterShader(lo, hi)
     shader.setRasterShaderFunction(ramp)
