@@ -29,6 +29,6 @@ class WebODMImporter:
     def _toggle_panel(self):
         if self.panel is None:
             self.panel = WebODMPanel(self.iface)
-            self.iface.addDockWidget(Qt.RightDockWidgetArea, self.panel)
+            self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.panel)
         else:
             self.panel.setVisible(not self.panel.isVisible())

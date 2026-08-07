@@ -106,6 +106,7 @@ def generate_hillshade(dtm_path: str, output_path: str) -> str:
     })
     return output_path
 
+
 def render_elevation_composite(elev_path: str, hs_path: str, output_path: str) -> str:
     """Bake elevation color ramp + hillshade (Multiply 70%) into a single RGB GeoTIFF."""
     ds_elev = gdal.Open(elev_path)
@@ -159,11 +160,12 @@ def render_elevation_composite(elev_path: str, hs_path: str, output_path: str) -
     ds_out = ds_hs = ds_elev = None
     return output_path
 
+
 def apply_vegetation_style(layer: QgsRasterLayer) -> None:
     """Red → white → green ramp for VARI index."""
     lo, hi = -1.0, 1.0
     ramp = QgsColorRampShader(lo, hi)
-    ramp.setColorRampType(QgsColorRampShader.Interpolated)
+    ramp.setColorRampType(QgsColorRampShader.Type.Interpolated)
     ramp.setColorRampItemList([
         QgsColorRampShader.ColorRampItem(-1.0, QColor('#d73027')),
         QgsColorRampShader.ColorRampItem(-0.1, QColor('#fc8d59')),

@@ -218,7 +218,10 @@ class WebODMPanel(QDockWidget):
         self._assets = {}
 
         self.setObjectName('WebODMImporterPanel')
-        self.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
+        self.setAllowedAreas(
+            Qt.DockWidgetArea.RightDockWidgetArea
+            | Qt.DockWidgetArea.LeftDockWidgetArea
+        )
         self.setMaximumHeight(620)
 
         root_widget = QWidget()
@@ -237,6 +240,7 @@ class WebODMPanel(QDockWidget):
         self._src_edit.setReadOnly(True)
         btn_src = QPushButton('Select ZIP')
         btn_src.setFixedWidth(90)
+        self._control_row_height = max(self._src_edit.sizeHint().height(), btn_src.sizeHint().height())
         btn_src.clicked.connect(self._select_source)
         row_src.addWidget(self._src_edit)
         row_src.addWidget(btn_src)
@@ -321,9 +325,11 @@ class WebODMPanel(QDockWidget):
         lay = QVBoxLayout(grp)
         row_existing = QHBoxLayout()
         self._combo_existing = _AutoRefreshCombo(self._refresh_existing_combo)
+        self._combo_existing.setFixedHeight(self._control_row_height)
         row_existing.addWidget(self._combo_existing)
         btn_load = QPushButton('Load')
         btn_load.setFixedWidth(90)
+        btn_load.setFixedHeight(self._control_row_height)
         btn_load.clicked.connect(self._load_existing)
         row_existing.addWidget(btn_load)
         lay.addLayout(row_existing)
@@ -362,7 +368,7 @@ class WebODMPanel(QDockWidget):
 
         lbl_credit = QLabel('Developed by Avid Tree Work')
         lbl_credit.setStyleSheet(_note_style())
-        lbl_credit.setAlignment(Qt.AlignCenter)
+        lbl_credit.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main.addWidget(lbl_credit)
 
         main.addStretch()
@@ -659,7 +665,6 @@ class WebODMPanel(QDockWidget):
 
     def _refresh_existing_combo(self):
         from qgis.PyQt.QtGui import QColor
-        from qgis.PyQt.QtCore import Qt
         self._combo_existing.clear()
         self._combo_existing.addItem('— select —')
         base = self._output_base()
@@ -861,9 +866,9 @@ class WebODMPanel(QDockWidget):
                 'Do you want to continue?\n'
                 '※ Conversion will be terminated if it does not complete within 10 minutes.'
             )
-            btn_continue = msg.addButton('Continue', QMessageBox.AcceptRole)
-            msg.addButton('Skip LAS Conversion', QMessageBox.RejectRole)
-            msg.exec_()
+            btn_continue = msg.addButton('Continue', QMessageBox.ButtonRole.AcceptRole)
+            msg.addButton('Skip LAS Conversion', QMessageBox.ButtonRole.RejectRole)
+            msg.exec()
             if msg.clickedButton() != btn_continue:
                 self._finish_load_existing(group, added)
                 return
@@ -895,7 +900,7 @@ class WebODMPanel(QDockWidget):
     def _update_status(self, text):
         from qgis.PyQt.QtWidgets import QApplication
         self._lbl_run_status.setText(text)
-        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
 
     def _run(self):
         base = self._output_base()
@@ -1113,9 +1118,9 @@ class WebODMPanel(QDockWidget):
                 'Do you want to continue?\n'
                 '※ Conversion will be terminated if it does not complete within 10 minutes.'
             )
-            btn_continue = msg.addButton('Continue', QMessageBox.AcceptRole)
-            msg.addButton('Skip Point Cloud', QMessageBox.RejectRole)
-            msg.exec_()
+            btn_continue = msg.addButton('Continue', QMessageBox.ButtonRole.AcceptRole)
+            msg.addButton('Skip Point Cloud', QMessageBox.ButtonRole.RejectRole)
+            msg.exec()
             if msg.clickedButton() == btn_continue:
                 _step('Converting Point Cloud…')
                 self._start_copc_worker(abs_assets['laz'], out_dir)
@@ -1190,7 +1195,6 @@ class WebODMPanel(QDockWidget):
             return
 
         if copc_path:
-            from qgis.core import QgsCoordinateReferenceSystem
             self._update_status('Loading Point Cloud…')
             pc_layer = QgsPointCloudLayer(copc_path, 'Point Cloud', 'copc')
             crs = state.get('crs')
@@ -1202,7 +1206,9 @@ class WebODMPanel(QDockWidget):
                 err_msg = 'Point Cloud 変換タイムアウト（10分超過）。ファイルが大きすぎる可能性があります。'
             else:
                 err_msg = f'Point Cloud 変換失敗: {error[:200]}'
-            QgsMessageLog.logMessage(f'webodm_importer PDAL error:\n{error}', 'webodm_importer', Qgis.Warning)
+            QgsMessageLog.logMessage(
+                f'webodm_importer PDAL error:\n{error}', 'webodm_importer', Qgis.MessageLevel.Warning
+            )
             self._lbl_run_status.setText(err_msg)
             self._lbl_run_status.setStyleSheet('color: red; font-size: 11px;')
 
@@ -1250,7 +1256,9 @@ class WebODMPanel(QDockWidget):
                 err_msg = 'Point Cloud 変換タイムアウト（10分超過）'
             else:
                 err_msg = f'Point Cloud 変換失敗: {error[:200]}'
-            QgsMessageLog.logMessage(f'webodm_importer PDAL error:\n{error}', 'webodm_importer', Qgis.Warning)
+            QgsMessageLog.logMessage(
+                f'webodm_importer PDAL error:\n{error}', 'webodm_importer', Qgis.MessageLevel.Warning
+            )
             self._lbl_existing_status.setText(err_msg)
             self._lbl_existing_status.setStyleSheet(_note_style('red'))
         self._finish_load_existing(group, added)

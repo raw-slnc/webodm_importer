@@ -6,10 +6,10 @@
 
 [general]
 name=WebODM Importer
-qgisMinimumVersion=3.18
-qgisMaximumVersion=3.99
+qgisMinimumVersion=4.0
+qgisMaximumVersion=4.99
 description=Import WebODM task output into QGIS with automatic asset detection and layer generation.
-version=0.2.5
+version=1.0.0
 author=Hideharu Masai
 email=hideharumasai@void.mints.ne.jp
 
@@ -23,6 +23,7 @@ repository=https://github.com/raw-slnc/webodm_importer
 
 hasProcessingProvider=no
 changelog=
+    1.0.0 - QGIS 4.x support
     0.2.5 - Final release for QGIS 3.x; add flake8 configuration for local pre-release scanning workflow and clean up processor.py formatting/import issues to keep local security/quality checks reproducible before packaging
     0.2.4 - Fix bandit security scan warnings: use hashlib.md5(usedforsecurity=False) for ZIP fingerprint hash (B324); suppress subprocess-related false positives for PDAL pipeline invocation with nosec B404/B603/B607; suppress intentional bare-except patterns with nosec B110; fix Stop button not immediately terminating PDAL process (switch subprocess.run to Popen with kill on cancel); fix duplicate import detection failing when a previously cancelled import left a folder without metadata (scan all numbered variants)
     0.2.3 - Fix LAS to COPC conversion failure on Windows environments where NTFS 8.3 name generation is disabled: fall back to ASCII hardlink (or copy) for non-ASCII input paths; add PDAL error logging to QGIS message log; fix las_sources.json relative paths with Windows backslashes not resolving on Linux
