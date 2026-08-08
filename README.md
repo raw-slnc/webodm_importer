@@ -140,7 +140,7 @@ Layer styles (elevation ramp, vegetation index, hillshade) are applied using gen
 
 ## Requirements
 
-- QGIS 3.18 or later
+- QGIS 4.0 or later
 - WebODM task output ZIP
 
 ### Point Cloud
