@@ -12,7 +12,7 @@ import json
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QCheckBox, QFileDialog,
-    QComboBox, QGroupBox, QProgressBar, QMessageBox,
+    QComboBox, QGroupBox, QProgressBar, QMessageBox, QSizePolicy,
 )
 from qgis.PyQt.QtCore import Qt, QThread, QTimer, pyqtSignal, QEventLoop
 import time
@@ -216,13 +216,15 @@ class WebODMPanel(QDockWidget):
         self._source_path = None
         self._is_zip = False
         self._assets = {}
+        self._floating_maximum_height = 620
 
         self.setObjectName('WebODMImporterPanel')
         self.setAllowedAreas(
             Qt.DockWidgetArea.RightDockWidgetArea
             | Qt.DockWidgetArea.LeftDockWidgetArea
         )
-        self.setMaximumHeight(620)
+        self.topLevelChanged.connect(self._on_top_level_changed)
+        self._restore_docked_size_constraints()
 
         root_widget = QWidget()
         self.setWidget(root_widget)
@@ -377,6 +379,21 @@ class WebODMPanel(QDockWidget):
         self._refresh_existing_combo()
 
     # ── Helpers ─────────────────────────────────────
+    def _on_top_level_changed(self, floating: bool):
+        if floating:
+            self.setMaximumHeight(self._floating_maximum_height)
+            self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+            self.updateGeometry()
+            return
+
+        self._restore_docked_size_constraints()
+        QTimer.singleShot(0, self._restore_docked_size_constraints)
+
+    def _restore_docked_size_constraints(self):
+        self.setMaximumHeight(16777215)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self.updateGeometry()
+
     def _source_hash(self) -> str:
         """ソースZIPの先頭2MBからMD5ハッシュを生成する（フォルダ時は空文字）。"""
         if not self._is_zip or not self._source_path:
