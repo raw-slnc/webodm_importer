@@ -1,5 +1,5 @@
 """
-WebODM Importer — right dock panel.
+WebODM Importer — panel window.
 UI rules: one item per row; status/notes on the line below; columns where needed.
 """
 
@@ -10,9 +10,9 @@ import hashlib
 import json
 
 from qgis.PyQt.QtWidgets import (
-    QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
+    QDialog, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QCheckBox, QFileDialog,
-    QComboBox, QGroupBox, QProgressBar, QMessageBox, QSizePolicy,
+    QComboBox, QGroupBox, QProgressBar, QMessageBox,
 )
 from qgis.PyQt.QtCore import Qt, QThread, QTimer, pyqtSignal, QEventLoop
 import time
@@ -209,26 +209,17 @@ def _note_style(color='gray'):
     return f'color: {color}; font-size: 11px;'
 
 
-class WebODMPanel(QDockWidget):
+class WebODMPanel(QDialog):
     def __init__(self, iface):
-        super().__init__('WebODM Importer')
+        super().__init__(iface.mainWindow())
+        self.setWindowTitle('WebODM Importer')
+        self.resize(720, 620)
         self.iface = iface
         self._source_path = None
         self._is_zip = False
         self._assets = {}
-        self._floating_maximum_height = 620
 
-        self.setObjectName('WebODMImporterPanel')
-        self.setAllowedAreas(
-            Qt.DockWidgetArea.RightDockWidgetArea
-            | Qt.DockWidgetArea.LeftDockWidgetArea
-        )
-        self.topLevelChanged.connect(self._on_top_level_changed)
-        self._restore_docked_size_constraints()
-
-        root_widget = QWidget()
-        self.setWidget(root_widget)
-        main = QVBoxLayout(root_widget)
+        main = QVBoxLayout(self)
         main.setContentsMargins(8, 8, 8, 8)
         main.setSpacing(6)
 
@@ -379,21 +370,6 @@ class WebODMPanel(QDockWidget):
         self._refresh_existing_combo()
 
     # ── Helpers ─────────────────────────────────────
-    def _on_top_level_changed(self, floating: bool):
-        if floating:
-            self.setMaximumHeight(self._floating_maximum_height)
-            self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
-            self.updateGeometry()
-            return
-
-        self._restore_docked_size_constraints()
-        QTimer.singleShot(0, self._restore_docked_size_constraints)
-
-    def _restore_docked_size_constraints(self):
-        self.setMaximumHeight(16777215)
-        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        self.updateGeometry()
-
     def _source_hash(self) -> str:
         """ソースZIPの先頭2MBからMD5ハッシュを生成する（フォルダ時は空文字）。"""
         if not self._is_zip or not self._source_path:
