@@ -9,7 +9,7 @@ name=WebODM Importer
 qgisMinimumVersion=4.0
 qgisMaximumVersion=4.99
 description=Import WebODM task output into QGIS with automatic asset detection and layer generation.
-version=1.0.1
+version=1.0.2
 author=Hideharu Masai
 email=hideharumasai@void.mints.ne.jp
 
@@ -23,6 +23,7 @@ repository=https://github.com/raw-slnc/webodm_importer
 
 hasProcessingProvider=no
 changelog=
+    1.0.2 - Add _toggle_panel compatibility alias for callers that still use the older WebODM Importer panel opener name; keeps Forestry Operations Lite Virtual Shizuoka export handoff working with the QGIS 4.x standalone window implementation
     1.0.1 - Fixed the dock panel being capped at a fixed maximum height even when docked. Windows testing then surfaced a separate, likely unrelated symptom: floating the panel, dragging it, then double-clicking to re-dock could leave a stuck translucent overlay over the main window until QGIS was restarted (stable when re-docking immediately without dragging first); this also affected other panels once triggered, pointing to Qt's dock/float state handling (QMainWindowLayout) on Windows/Qt6 rather than this plugin's code. To keep the plugin out of that code path entirely, replaced the QDockWidget-based panel with a plain modeless QDialog window; the panel does not need to be viewed alongside the map canvas or resized dynamically, so a standalone window is sufficient
     1.0.0 - QGIS 4.x support
     0.2.5 - Final release for QGIS 3.x; add flake8 configuration for local pre-release scanning workflow and clean up processor.py formatting/import issues to keep local security/quality checks reproducible before packaging

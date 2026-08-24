@@ -33,5 +33,8 @@ class WebODMImporter:
         self.panel.raise_()
         self.panel.activateWindow()
 
+    def _toggle_panel(self):
+        self._show_panel()
+
     def _on_panel_destroyed(self):
         self.panel = None
