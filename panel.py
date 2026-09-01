@@ -5,9 +5,14 @@ UI rules: one item per row; status/notes on the line below; columns where needed
 
 import os
 import re
+import sys
 import zipfile
 import hashlib
 import json
+import shutil
+import uuid
+import tempfile
+import subprocess  # nosec B404
 
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout,
@@ -42,7 +47,6 @@ class _CopcWorker(QThread):
     def _pdal(self, pipeline_json, win_flags):
         """pdal pipeline を実行し (returncode, stderr) を返す。
         キャンセル時は (None, '')、タイムアウト時は ('TIMEOUT', '') を返す。"""
-        import subprocess  # nosec B404
         proc = subprocess.Popen(  # nosec B603, B607
             ['pdal', 'pipeline', '--stdin'],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -63,8 +67,6 @@ class _CopcWorker(QThread):
         return proc.returncode, (err or '').strip()
 
     def run(self):
-        import subprocess, json, sys, shutil, uuid, tempfile  # nosec B404
-
         copc_path = self._copc_path
         _uid = uuid.uuid4().hex[:8]
         _tmp_inputs = []  # Windows: 一時ハードリンク/コピーの管理
@@ -190,7 +192,6 @@ from . import asset_detector, processor
 
 
 def _pdal_available() -> bool:
-    import shutil
     return shutil.which('pdal') is not None
 
 
@@ -538,7 +539,6 @@ class WebODMPanel(QDialog):
 
     def _convert_to_copc(self, las_paths, out_dir):
         """PDAL CLI で LAS/LAZ（単数または複数）→ COPC 変換。変換済みなら再利用する。"""
-        import subprocess, json, sys, shutil, uuid, tempfile  # nosec B404
         las_paths = las_paths if isinstance(las_paths, list) else [las_paths]
         pc_cache = os.path.join(out_dir, 'pc_cache')
         os.makedirs(pc_cache, exist_ok=True)
