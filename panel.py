@@ -379,17 +379,44 @@ class WebODMPanel(QDialog):
             h.update(f.read(2 * 1024 * 1024))
         return h.hexdigest()
 
-    def _save_meta(self, out_dir: str) -> None:
+    def _save_meta(self, out_dir: str, generated_derivatives=None) -> None:
         meta = {'source': self._source_path, 'hash': self._source_hash()}
+        if generated_derivatives is not None:
+            meta['generated_derivatives'] = sorted(generated_derivatives)
         with open(os.path.join(out_dir, '.import_meta.json'), 'w') as f:
             json.dump(meta, f)
 
-    def _load_meta_hash(self, folder: str) -> str:
+    def _load_meta(self, folder: str) -> dict:
         meta_path = os.path.join(folder, '.import_meta.json')
         if not os.path.isfile(meta_path):
-            return ''
-        with open(meta_path) as f:
-            return json.load(f).get('hash', '')
+            return {}
+        try:
+            with open(meta_path) as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _load_meta_hash(self, folder: str) -> str:
+        return self._load_meta(folder).get('hash', '')
+
+    def _load_generated_derivatives(self, folder: str, derived_assets=None) -> set:
+        meta = self._load_meta(folder)
+        generated = meta.get('generated_derivatives')
+        if generated is not None:
+            return set(generated)
+        if meta and derived_assets:
+            # Legacy imports created these derived files in this plugin before
+            # generation tracking was added.
+            return set(derived_assets)
+        return set()
+
+    def _derived_layer_name(self, name: str, key: str, generated_derivatives) -> str:
+        return name + '*' if key in generated_derivatives else name
+
+    def _extract_zip_member(self, zf, entry_map, rel, out_dir):
+        zf.extract(entry_map.get(rel, rel), out_dir)
+        return os.path.join(out_dir, rel)
+
 
     def _find_duplicate_import(self, base: str, group_name: str) -> bool:
         """base 以下の同名フォルダ（連番バリアント含む）にハッシュ一致の import があれば True。"""
@@ -778,6 +805,8 @@ class WebODMPanel(QDialog):
             return
         folder = os.path.join(base, selected)
         assets = asset_detector.detect(folder)
+        derived_assets = asset_detector.detect_derived(folder)
+        generated_derivatives = self._load_generated_derivatives(folder, derived_assets)
 
         self._remove_group(selected)
 
@@ -793,28 +822,37 @@ class WebODMPanel(QDialog):
                 added.append('Orthophoto')
 
         # Vegetation
-        veg_path = os.path.join(folder, 'vegetation.tif')
-        if os.path.isfile(veg_path):
-            layer = QgsRasterLayer(veg_path, 'Vegetation (VARI)')
+        veg_path = derived_assets.get('vegetation')
+        if veg_path:
+            layer = QgsRasterLayer(
+                veg_path,
+                self._derived_layer_name('Vegetation (VARI)', 'vegetation', generated_derivatives),
+            )
             if layer.isValid():
                 processor.apply_vegetation_style(layer)
                 self._add_to_group(layer, group)
                 added.append('Vegetation')
 
-        hs_dtm_path = os.path.join(folder, 'hillshade_dtm.tif')
-        comp_dsm_path = os.path.join(folder, 'surface_model.tif')
-        comp_dtm_path = os.path.join(folder, 'terrain_model.tif')
+        hs_dtm_path = derived_assets.get('hillshade_dtm')
+        comp_dsm_path = derived_assets.get('surface_model')
+        comp_dtm_path = derived_assets.get('terrain_model')
 
         # Surface Model (baked composite RGB)
-        if 'dsm' in assets and os.path.isfile(comp_dsm_path):
-            layer = QgsRasterLayer(comp_dsm_path, 'Surface Model')
+        if comp_dsm_path:
+            layer = QgsRasterLayer(
+                comp_dsm_path,
+                self._derived_layer_name('Surface Model', 'surface_model', generated_derivatives),
+            )
             if layer.isValid():
                 self._add_to_group(layer, group)
             added.append('Surface Model')
 
         # Terrain Model (baked composite RGB)
-        if 'dtm' in assets and os.path.isfile(comp_dtm_path):
-            layer = QgsRasterLayer(comp_dtm_path, 'Terrain Model')
+        if comp_dtm_path:
+            layer = QgsRasterLayer(
+                comp_dtm_path,
+                self._derived_layer_name('Terrain Model', 'terrain_model', generated_derivatives),
+            )
             if layer.isValid():
                 self._add_to_group(layer, group)
             added.append('Terrain Model')
@@ -832,15 +870,21 @@ class WebODMPanel(QDialog):
                 self._add_to_group(layer, group)
 
         # Standalone Hillshade (DTM)
-        if os.path.isfile(hs_dtm_path):
-            layer = QgsRasterLayer(hs_dtm_path, 'Hillshade (DTM)')
+        if hs_dtm_path:
+            layer = QgsRasterLayer(
+                hs_dtm_path,
+                self._derived_layer_name('Hillshade (DTM)', 'hillshade_dtm', generated_derivatives),
+            )
             if layer.isValid():
                 self._add_to_group(layer, group)
 
         # CHM
-        chm_path = os.path.join(folder, 'chm.tif')
-        if os.path.isfile(chm_path):
-            layer = QgsRasterLayer(chm_path, 'CHM')
+        chm_path = derived_assets.get('chm')
+        if chm_path:
+            layer = QgsRasterLayer(
+                chm_path,
+                self._derived_layer_name('CHM', 'chm', generated_derivatives),
+            )
             if layer.isValid():
                 self._add_to_group(layer, group)
                 added.append('CHM')
@@ -959,14 +1003,14 @@ class WebODMPanel(QDialog):
                                 resolved.append(os.path.join(out_dir, r))
                         abs_assets[key] = resolved
                     else:
-                        zf.extract(_entry_map.get(rel, rel), out_dir)
-                        abs_assets[key] = os.path.join(out_dir, rel)
+                        abs_assets[key] = self._extract_zip_member(zf, _entry_map, rel, out_dir)
         else:
             abs_assets = self._assets
 
         root = QgsProject.instance().layerTreeRoot()
         group = root.insertGroup(0, group_name)
         added = []
+        generated_derivatives = set()
 
         # Orthophoto
         if self._chk_ortho.isChecked() and 'ortho' in abs_assets:
@@ -989,7 +1033,8 @@ class WebODMPanel(QDialog):
             veg_path = os.path.join(out_dir, 'vegetation.tif')
             _step('Generating vegetation index…')
             processor.generate_vegetation_index(abs_assets['ortho'], veg_path)
-            layer = QgsRasterLayer(veg_path, 'Vegetation (VARI)')
+            generated_derivatives.add('vegetation')
+            layer = QgsRasterLayer(veg_path, 'Vegetation (VARI)*')
             if layer.isValid():
                 processor.apply_vegetation_style(layer)
                 self._add_to_group(layer, group)
@@ -1013,12 +1058,14 @@ class WebODMPanel(QDialog):
             if self._chk_hillshade.isChecked():
                 _step('Generating hillshade (DSM)…')
                 processor.generate_hillshade(abs_assets['dsm'], hs_dsm_path)
+                generated_derivatives.add('hillshade_dsm')
                 _step('Rendering Surface Model…')
                 processor.render_elevation_composite(abs_assets['dsm'], hs_dsm_path, comp_dsm_path)
-                layer = QgsRasterLayer(comp_dsm_path, 'Surface Model')
+                generated_derivatives.add('surface_model')
+                layer = QgsRasterLayer(comp_dsm_path, 'Surface Model*')
                 if layer.isValid():
                     self._add_to_group(layer, group)
-                added.append('Surface Model')
+                    added.append('Surface Model')
 
 
         if self._cancelled:
@@ -1033,12 +1080,14 @@ class WebODMPanel(QDialog):
             if self._chk_hillshade.isChecked():
                 _step('Generating hillshade (DTM)…')
                 processor.generate_hillshade(abs_assets['dtm'], hs_dtm_path)
+                generated_derivatives.add('hillshade_dtm')
                 _step('Rendering Terrain Model…')
                 processor.render_elevation_composite(abs_assets['dtm'], hs_dtm_path, comp_dtm_path)
-                layer = QgsRasterLayer(comp_dtm_path, 'Terrain Model')
+                generated_derivatives.add('terrain_model')
+                layer = QgsRasterLayer(comp_dtm_path, 'Terrain Model*')
                 if layer.isValid():
                     self._add_to_group(layer, group)
-                added.append('Terrain Model')
+                    added.append('Terrain Model')
 
         # Standalone DSM
         if 'dsm' in abs_assets:
@@ -1054,7 +1103,10 @@ class WebODMPanel(QDialog):
 
         # Standalone Hillshade (DTM)
         if os.path.isfile(hs_dtm_path):
-            layer = QgsRasterLayer(hs_dtm_path, 'Hillshade (DTM)')
+            layer = QgsRasterLayer(
+                hs_dtm_path,
+                self._derived_layer_name('Hillshade (DTM)', 'hillshade_dtm', generated_derivatives),
+            )
             if layer.isValid():
                 self._add_to_group(layer, group)
 
@@ -1071,7 +1123,8 @@ class WebODMPanel(QDialog):
             chm_path = os.path.join(out_dir, 'chm.tif')
             _step('Generating CHM…')
             processor.generate_chm(abs_assets['dsm'], abs_assets['dtm'], chm_path)
-            layer = QgsRasterLayer(chm_path, 'CHM')
+            generated_derivatives.add('chm')
+            layer = QgsRasterLayer(chm_path, 'CHM*')
             if layer.isValid():
                 self._add_to_group(layer, group)
                 added.append('CHM')
@@ -1099,6 +1152,7 @@ class WebODMPanel(QDialog):
             'root': root, 'pc_layer': pc_layer,
             'laz': abs_assets.get('laz') if self._chk_laz.isChecked() else None,
             'step': _step,
+            'generated_derivatives': generated_derivatives,
         }
 
         if pc_layer:
@@ -1211,7 +1265,7 @@ class WebODMPanel(QDialog):
 
         if added:
             group.setExpanded(True)
-            self._save_meta(out_dir)
+            self._save_meta(out_dir, state.get('generated_derivatives', set()))
             done_msg = 'Done: ' + ', '.join(added)
             speed_str = getattr(self, '_copc_speed_str', '')
             if speed_str:

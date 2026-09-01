@@ -23,6 +23,15 @@ ASSET_LABELS = {
     'laz':   'Point Cloud (.laz)',
 }
 
+DERIVED_ASSET_SPEC = {
+    'vegetation':    'vegetation.tif',
+    'hillshade_dsm': 'hillshade_dsm.tif',
+    'hillshade_dtm': 'hillshade_dtm.tif',
+    'surface_model': 'surface_model.tif',
+    'terrain_model': 'terrain_model.tif',
+    'chm':           'chm.tif',
+}
+
 
 def detect(folder: str) -> dict:
     """フォルダから資産を検出。{key: absolute_path}"""
@@ -77,6 +86,16 @@ def detect_from_zip(zip_path: str) -> dict:
                     las_paths.append(abs_path)
             if las_paths:
                 found['laz'] = las_paths
+    return found
+
+
+def detect_derived(folder: str) -> dict:
+    """フォルダから派生済み資産を検出。{key: absolute_path}"""
+    found = {}
+    for key, rel in DERIVED_ASSET_SPEC.items():
+        abs_path = os.path.join(folder, rel)
+        if os.path.isfile(abs_path):
+            found[key] = abs_path
     return found
 
 

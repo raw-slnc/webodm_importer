@@ -24,6 +24,49 @@ _ELEV_RAMP = [
     (1.0,  (0xFF, 0x00, 0x00)),
 ]
 
+_RDYLGN_RAMP = [
+    '#a50026',
+    '#d73027',
+    '#f46d43',
+    '#fdae61',
+    '#fee08b',
+    '#ffffbf',
+    '#d9ef8b',
+    '#a6d96a',
+    '#66bd63',
+    '#1a9850',
+    '#006837',
+]
+
+
+def _single_band_percentile_range(path: str, pmin=2.0, pmax=98.0):
+    ds = gdal.Open(path)
+    if ds is None or ds.RasterCount != 1:
+        return None
+
+    band = ds.GetRasterBand(1)
+    max_pixels = 2_000_000
+    scale = max(1.0, (ds.RasterXSize * ds.RasterYSize / max_pixels) ** 0.5)
+    buf_xsize = max(1, int(ds.RasterXSize / scale))
+    buf_ysize = max(1, int(ds.RasterYSize / scale))
+    arr = band.ReadAsArray(buf_xsize=buf_xsize, buf_ysize=buf_ysize).astype(np.float32)
+
+    nodata = band.GetNoDataValue()
+    valid = np.isfinite(arr)
+    if nodata is not None:
+        valid &= arr != nodata
+    values = arr[valid]
+    ds = None
+
+    if values.size == 0:
+        return None
+
+    lo, hi = np.percentile(values, [pmin, pmax])
+    lo, hi = float(lo), float(hi)
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        return None
+    return lo, hi
+
 
 def generate_chm(dsm_path: str, dtm_path: str, output_path: str) -> str:
     """CHM = DSM - DTM。DSM を DTM グリッドに合わせてから演算する。"""
@@ -56,7 +99,7 @@ def generate_chm(dsm_path: str, dtm_path: str, output_path: str) -> str:
 
 
 def generate_vegetation_index(ortho_path: str, output_path: str) -> str:
-    """VARI = (G - R) / (G + R - B)  from RGB orthophoto (bands 1=R, 2=G, 3=B).
+    """VARI = (G - R) / (G + R - B) from RGB orthophoto (bands 1=R, 2=G, 3=B).
     nodata 領域は -9999 をセットし QGIS で透明描画させる。"""
     from osgeo import gdal
     _NODATA = -9999.0
@@ -76,8 +119,9 @@ def generate_vegetation_index(ortho_path: str, output_path: str) -> str:
         else:
             nodata_mask = (r == 0) & (g == 0) & (b == 0)
 
-    vari = (g - r) / (g + r - b + 0.001)
-    vari = np.clip(vari, -1.0, 1.0)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        vari = np.nan_to_num((g - r) / (g + r - b)).astype(np.float32)
+    vari[(vari > 1e30) | (vari < -1e30)] = _NODATA
     vari[nodata_mask] = _NODATA
 
     h, w = r.shape
@@ -162,16 +206,19 @@ def render_elevation_composite(elev_path: str, hs_path: str, output_path: str) -
 
 
 def apply_vegetation_style(layer: QgsRasterLayer) -> None:
-    """Red → white → green ramp for VARI index."""
-    lo, hi = -1.0, 1.0
+    """Apply WebODM-like RdYlGn styling to a raw, single-band vegetation index."""
+    source = layer.source().split('|', 1)[0]
+    value_range = _single_band_percentile_range(source)
+    if value_range is None:
+        return
+
+    lo, hi = value_range
     ramp = QgsColorRampShader(lo, hi)
     ramp.setColorRampType(QgsColorRampShader.Type.Interpolated)
+    step = (hi - lo) / (len(_RDYLGN_RAMP) - 1)
     ramp.setColorRampItemList([
-        QgsColorRampShader.ColorRampItem(-1.0, QColor('#d73027')),
-        QgsColorRampShader.ColorRampItem(-0.1, QColor('#fc8d59')),
-        QgsColorRampShader.ColorRampItem(0.0, QColor('#ffffbf')),
-        QgsColorRampShader.ColorRampItem(0.2, QColor('#91cf60')),
-        QgsColorRampShader.ColorRampItem(1.0, QColor('#1a9641')),
+        QgsColorRampShader.ColorRampItem(lo + step * i, QColor(color))
+        for i, color in enumerate(_RDYLGN_RAMP)
     ])
     shader = QgsRasterShader(lo, hi)
     shader.setRasterShaderFunction(ramp)
