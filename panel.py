@@ -189,6 +189,7 @@ class _CopcWorker(QThread):
         self.finished.emit('', _last_error)
 
 from . import asset_detector, processor
+from . import custom_vegetation_index as custom_vi_module
 
 
 def _pdal_available() -> bool:
@@ -219,6 +220,7 @@ class WebODMPanel(QDialog):
         self._source_path = None
         self._is_zip = False
         self._assets = {}
+        self._is_fol_source = False
 
         main = QVBoxLayout(self)
         main.setContentsMargins(8, 8, 8, 8)
@@ -308,6 +310,11 @@ class WebODMPanel(QDialog):
         self._chk_chm = QCheckBox('CHM')
         self._chk_chm.setChecked(True)
         col_opt_right.addWidget(self._chk_chm)
+
+        self._chk_custom_vi = QCheckBox('Custom Vegetation Index (Prototype)')
+        self._chk_custom_vi.setChecked(False)
+        self._chk_custom_vi.setVisible(False)  # ソース未選択時は非FOL扱いで隠す
+        col_opt_right.addWidget(self._chk_custom_vi)
 
         col_opt.addLayout(col_opt_left)
         col_opt.addLayout(col_opt_right)
@@ -743,6 +750,7 @@ class WebODMPanel(QDialog):
             self._assets = asset_detector.detect_from_zip(self._source_path)
         else:
             self._assets = asset_detector.detect(self._source_path)
+        self._is_fol_source = asset_detector.is_fol_source(self._source_path, self._is_zip)
 
         found = len(self._assets)
         total = len(asset_detector.ASSET_SPEC)
@@ -772,6 +780,17 @@ class WebODMPanel(QDialog):
         self._chk_chm.setEnabled(can_chm)
         self._chk_chm.setChecked(can_chm)
         self._chk_chm.setText('CHM' if can_chm else 'CHM\n(DSM or DTM missing)')
+
+        # 較正データ(FOL Virtual Shizuoka Export)以外では検証していないため、
+        # UI自体を出さない(他由来のデータでは選択肢として見せない)
+        self._chk_custom_vi.setVisible(self._is_fol_source)
+        can_custom_vi = self._is_fol_source and can_chm and 'ortho' in self._assets
+        self._chk_custom_vi.setEnabled(can_custom_vi)
+        self._chk_custom_vi.setChecked(False)
+        self._chk_custom_vi.setText(
+            'Custom Vegetation Index (Prototype)' if can_custom_vi
+            else 'Custom Vegetation Index (Prototype)\n(DSM, DTM and Orthophoto required)'
+        )
 
         has_pc = 'ept' in self._assets or 'laz' in self._assets
         laz_only = 'laz' in self._assets and 'ept' not in self._assets
@@ -889,6 +908,19 @@ class WebODMPanel(QDialog):
                 self._add_to_group(layer, group)
                 added.append('CHM')
 
+        # Custom Vegetation Index (prototype)
+        custom_vi_path = derived_assets.get('custom_vegetation_index')
+        if custom_vi_path:
+            layer = QgsRasterLayer(
+                custom_vi_path,
+                self._derived_layer_name('Custom Vegetation Index (Prototype)',
+                                         'custom_vegetation_index', generated_derivatives),
+            )
+            if layer.isValid():
+                processor.apply_vegetation_style(layer)
+                self._add_to_group(layer, group)
+                added.append('Custom Vegetation Index')
+
         # Point Cloud (EPT preferred, LAZ fallback)
         if 'ept' in assets:
             layer = QgsPointCloudLayer(assets['ept'], 'Point Cloud', 'ept')
@@ -968,6 +1000,7 @@ class WebODMPanel(QDialog):
             + (2 if chk and self._chk_dsm.isChecked() and 'dsm' in a else 0)
             + (2 if chk and 'dtm' in a else 0)
             + (1 if self._chk_chm.isChecked() and 'dsm' in a and 'dtm' in a else 0)
+            + (1 if self._chk_custom_vi.isChecked() and 'dsm' in a and 'dtm' in a and 'ortho' in a else 0)
             + (2 if has_laz_conversion else 1 if self._chk_laz.isChecked() and 'ept' in a else 0)
         )
         self._progress_bar.setRange(0, max(steps, 1))
@@ -1004,6 +1037,10 @@ class WebODMPanel(QDialog):
                         abs_assets[key] = resolved
                     else:
                         abs_assets[key] = self._extract_zip_member(zf, _entry_map, rel, out_dir)
+                # las_sources.json はアセットではなくFOL由来判定用のマーカーとして
+                # out_dir にも残す（Load Existing で由来を再判定できるように）
+                if 'las_sources.json' in _entry_map:
+                    zf.extract(_entry_map['las_sources.json'], out_dir)
         else:
             abs_assets = self._assets
 
@@ -1128,6 +1165,20 @@ class WebODMPanel(QDialog):
             if layer.isValid():
                 self._add_to_group(layer, group)
                 added.append('CHM')
+
+        # Custom Vegetation Index (prototype)
+        if (self._chk_custom_vi.isChecked() and asset_detector.can_generate_chm(abs_assets)
+                and 'ortho' in abs_assets):
+            custom_vi_path = os.path.join(out_dir, 'custom_vegetation_index.tif')
+            _step('Generating custom vegetation index (prototype)…')
+            custom_vi_module.generate_custom_vegetation_index(
+                abs_assets['dsm'], abs_assets['dtm'], abs_assets['ortho'], custom_vi_path)
+            generated_derivatives.add('custom_vegetation_index')
+            layer = QgsRasterLayer(custom_vi_path, 'Custom Vegetation Index (Prototype)*')
+            if layer.isValid():
+                processor.apply_vegetation_style(layer)
+                self._add_to_group(layer, group)
+                added.append('Custom Vegetation Index')
 
 
         if self._cancelled:

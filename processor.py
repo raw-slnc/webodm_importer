@@ -39,35 +39,6 @@ _RDYLGN_RAMP = [
 ]
 
 
-def _single_band_percentile_range(path: str, pmin=2.0, pmax=98.0):
-    ds = gdal.Open(path)
-    if ds is None or ds.RasterCount != 1:
-        return None
-
-    band = ds.GetRasterBand(1)
-    max_pixels = 2_000_000
-    scale = max(1.0, (ds.RasterXSize * ds.RasterYSize / max_pixels) ** 0.5)
-    buf_xsize = max(1, int(ds.RasterXSize / scale))
-    buf_ysize = max(1, int(ds.RasterYSize / scale))
-    arr = band.ReadAsArray(buf_xsize=buf_xsize, buf_ysize=buf_ysize).astype(np.float32)
-
-    nodata = band.GetNoDataValue()
-    valid = np.isfinite(arr)
-    if nodata is not None:
-        valid &= arr != nodata
-    values = arr[valid]
-    ds = None
-
-    if values.size == 0:
-        return None
-
-    lo, hi = np.percentile(values, [pmin, pmax])
-    lo, hi = float(lo), float(hi)
-    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-        return None
-    return lo, hi
-
-
 def generate_chm(dsm_path: str, dtm_path: str, output_path: str) -> str:
     """CHM = DSM - DTM。DSM を DTM グリッドに合わせてから演算する。"""
     dtm_ds = gdal.Open(dtm_path)
@@ -206,13 +177,15 @@ def render_elevation_composite(elev_path: str, hs_path: str, output_path: str) -
 
 
 def apply_vegetation_style(layer: QgsRasterLayer) -> None:
-    """Apply WebODM-like RdYlGn styling to a raw, single-band vegetation index."""
-    source = layer.source().split('|', 1)[0]
-    value_range = _single_band_percentile_range(source)
-    if value_range is None:
-        return
+    """Apply WebODM-like RdYlGn styling to a raw, single-band vegetation index.
 
-    lo, hi = value_range
+    Uses VARI's fixed (-1, 1) range, matching WebODM's own formulas.py
+    definition, instead of a per-raster percentile stretch: a percentile
+    stretch gets dragged by the long tail of near-zero-denominator outliers
+    VARI produces over shadow, so real vegetation signal was being
+    compressed into a narrow band at the red end of the ramp.
+    """
+    lo, hi = -1.0, 1.0
     ramp = QgsColorRampShader(lo, hi)
     ramp.setColorRampType(QgsColorRampShader.Type.Interpolated)
     step = (hi - lo) / (len(_RDYLGN_RAMP) - 1)

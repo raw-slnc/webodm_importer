@@ -9,7 +9,7 @@ name=WebODM Importer
 qgisMinimumVersion=4.0
 qgisMaximumVersion=4.99
 description=Import WebODM task output into QGIS with automatic asset detection and layer generation.
-version=1.0.3
+version=1.0.4
 author=Hideharu Masai
 email=hideharumasai@void.mints.ne.jp
 
@@ -23,6 +23,7 @@ repository=https://github.com/raw-slnc/webodm_importer
 
 hasProcessingProvider=no
 changelog=
+    1.0.4 - Fix Vegetation (VARI)* styling: use a fixed (-1, 1) range instead of a per-image stretch that could compress real vegetation signal into red under shadowed terrain. Add an experimental "Custom Vegetation Index (Prototype)" option that reduces false "healthy vegetation" readings over roads, solar panels and other artificial flat ground, which the standard index cannot tell apart from real plants on its own; only shown for Forestry Operations Lite Virtual Shizuoka Export imports, since results elsewhere were not reliable, and hidden for any other import source
     1.0.3 - Mark plugin-generated derived layers with an asterisk in layer names and preserve that marker when reloading existing importer-managed datasets; align generated VARI values and vegetation styling more closely with WebODM by using the WebODM VARI formula and an RdYlGn 2-98 percentile stretch
     1.0.2 - Add _toggle_panel compatibility alias for callers that still use the older WebODM Importer panel opener name; keeps Forestry Operations Lite Virtual Shizuoka export handoff working with the QGIS 4.x standalone window implementation
     1.0.1 - Fixed the dock panel being capped at a fixed maximum height even when docked. Windows testing then surfaced a separate, likely unrelated symptom: floating the panel, dragging it, then double-clicking to re-dock could leave a stuck translucent overlay over the main window until QGIS was restarted (stable when re-docking immediately without dragging first); this also affected other panels once triggered, pointing to Qt's dock/float state handling (QMainWindowLayout) on Windows/Qt6 rather than this plugin's code. To keep the plugin out of that code path entirely, replaced the QDockWidget-based panel with a plain modeless QDialog window; the panel does not need to be viewed alongside the map canvas or resized dynamically, so a standalone window is sufficient

@@ -30,6 +30,7 @@ DERIVED_ASSET_SPEC = {
     'surface_model': 'surface_model.tif',
     'terrain_model': 'terrain_model.tif',
     'chm':           'chm.tif',
+    'custom_vegetation_index': 'custom_vegetation_index.tif',
 }
 
 
@@ -101,3 +102,18 @@ def detect_derived(folder: str) -> dict:
 
 def can_generate_chm(assets: dict) -> bool:
     return 'dsm' in assets and 'dtm' in assets
+
+
+def is_fol_source(source_path: str, is_zip: bool) -> bool:
+    """forestry_operations_lite の Virtual Shizuoka Export 由来かを判定。
+    その形式だけが同梱する las_sources.json の有無で見分ける。
+    実験的な派生物(Custom Vegetation Index)は、この形式で較正・検証した
+    データでしか有効な結果を出さないため、由来の絞り込みに使う。"""
+    if is_zip:
+        try:
+            with zipfile.ZipFile(source_path, 'r') as zf:
+                names = {n.replace('\\', '/') for n in zf.namelist()}
+                return 'las_sources.json' in names
+        except (OSError, zipfile.BadZipFile):
+            return False
+    return os.path.isfile(os.path.join(source_path, 'las_sources.json'))
