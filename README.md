@@ -143,6 +143,17 @@ WebODM-like `RdYlGn` colour ramp with a 2–98% percentile stretch. If a derived
 already an RGB GeoTIFF, its existing colours are preserved. Elevation styles can be customised after
 import via the QGIS layer properties.
 
+## Custom Vegetation Index (Prototype)
+
+An experimental option, shown only for ZIPs exported from Forestry Operations Lite's Virtual
+Shizuoka Export. It lowers the vegetation index value over flat, low-relief terrain, since real
+vegetation canopy is rarely perfectly flat — this reduces false "healthy vegetation" readings over
+roads, solar panels, and other flat artificial ground that the standard vegetation index cannot
+otherwise distinguish from real plants by colour alone.
+
+This is a prototype calibrated against a single test site, so results outside that context are not
+guaranteed to be reliable; that is also why the option is hidden for any other import source.
+
 ## Requirements
 
 - QGIS 4.0 or later

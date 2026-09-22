@@ -17,7 +17,7 @@ import subprocess  # nosec B404
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QCheckBox, QFileDialog,
-    QComboBox, QGroupBox, QProgressBar, QMessageBox,
+    QComboBox, QGroupBox, QProgressBar, QSpinBox,
 )
 from qgis.PyQt.QtCore import Qt, QThread, QTimer, pyqtSignal, QEventLoop
 import time
@@ -28,10 +28,11 @@ class _CopcWorker(QThread):
     """PDAL による LAS → COPC 変換をバックグラウンドで実行する。"""
     finished = pyqtSignal(str, str)  # (copc_path, error_msg)  失敗時は ('', エラー文字列)
 
-    def __init__(self, las_paths, copc_path, parent=None):
+    def __init__(self, las_paths, copc_path, timeout_sec=600, parent=None):
         super().__init__(parent)
         self._las_paths = las_paths
         self._copc_path = copc_path
+        self._timeout_sec = timeout_sec
         self._cancelled = False
         self._proc = None
 
@@ -55,7 +56,7 @@ class _CopcWorker(QThread):
         )
         self._proc = proc
         try:
-            _, err = proc.communicate(input=pipeline_json, timeout=600)
+            _, err = proc.communicate(input=pipeline_json, timeout=self._timeout_sec)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
@@ -120,6 +121,18 @@ class _CopcWorker(QThread):
             if tmp_copc != copc_path and os.path.isfile(tmp_copc):
                 shutil.move(tmp_copc, copc_path)
 
+        def _fail(error):
+            """失敗時、出力先に残った不完全な変換結果を削除してから通知する。
+            Linux 等は tmp_copc が copc_path と同一のため、放置すると次回起動時に
+            壊れたファイルを変換済みキャッシュと誤認してしまう。"""
+            if os.path.isfile(tmp_copc):
+                try:
+                    os.remove(tmp_copc)
+                except OSError:
+                    pass
+            _cleanup()
+            self.finished.emit('', error)
+
         _last_error = ''
 
         if len(las_paths) == 1:
@@ -129,9 +142,9 @@ class _CopcWorker(QThread):
             ]}
             rc, err = self._pdal(json.dumps(pipeline), _win_flags)
             if rc is None:
-                _cleanup(); self.finished.emit('', 'CANCELLED'); return
+                _fail('CANCELLED'); return
             if rc == 'TIMEOUT':
-                _cleanup(); self.finished.emit('', 'TIMEOUT'); return
+                _fail('TIMEOUT'); return
             if rc == 0 and os.path.isfile(tmp_copc):
                 _finalize_copc(); _cleanup(); self.finished.emit(copc_path, ''); return
             # フォールバック: Global Encoding WKT フラグ未設定の LAS 1.4 ファイル対策
@@ -142,9 +155,9 @@ class _CopcWorker(QThread):
             ]}
             rc2, err2 = self._pdal(json.dumps(pipeline_nosrs), _win_flags)
             if rc2 is None:
-                _cleanup(); self.finished.emit('', 'CANCELLED'); return
+                _fail('CANCELLED'); return
             if rc2 == 'TIMEOUT':
-                _cleanup(); self.finished.emit('', 'TIMEOUT'); return
+                _fail('TIMEOUT'); return
             if rc2 == 0 and os.path.isfile(tmp_copc):
                 _finalize_copc(); _cleanup(); self.finished.emit(copc_path, ''); return
             _last_error = err2 or _last_error
@@ -162,7 +175,7 @@ class _CopcWorker(QThread):
                 ]}
                 rc, err = self._pdal(json.dumps(merge_pipeline), _win_flags)
                 if rc is None:
-                    self.finished.emit('', 'CANCELLED'); return
+                    _fail('CANCELLED'); return
                 if rc == 'TIMEOUT':
                     _last_error = 'TIMEOUT'
                 elif rc != 0 or not os.path.isfile(tmp_las):
@@ -174,7 +187,7 @@ class _CopcWorker(QThread):
                     ]}
                     rc2, err2 = self._pdal(json.dumps(copc_pipeline), _win_flags)
                     if rc2 is None:
-                        self.finished.emit('', 'CANCELLED'); return
+                        _fail('CANCELLED'); return
                     if rc2 == 'TIMEOUT':
                         _last_error = 'TIMEOUT'
                     elif rc2 == 0 and os.path.isfile(tmp_copc):
@@ -185,8 +198,7 @@ class _CopcWorker(QThread):
                 if os.path.isfile(tmp_las):
                     os.remove(tmp_las)
 
-        _cleanup()
-        self.finished.emit('', _last_error)
+        _fail(_last_error)
 
 from . import asset_detector, processor
 from . import custom_vegetation_index as custom_vi_module
@@ -707,6 +719,7 @@ class WebODMPanel(QDialog):
                     self._combo_existing.model().item(idx).setForeground(QColor('gray'))
 
     def _update_convert_laz_checkbox(self):
+        self._chk_convert_laz.setText('Convert LAS to COPC')
         selected = self._combo_existing.currentText()
         if selected == '— select —':
             self._chk_convert_laz.setEnabled(False)
@@ -719,7 +732,12 @@ class WebODMPanel(QDialog):
         folder = os.path.join(base, selected)
         assets = asset_detector.detect(folder)
         has_laz = 'laz' in assets and 'ept' not in assets
-        if not has_laz or not _pdal_available():
+        if not has_laz:
+            self._chk_convert_laz.setEnabled(False)
+            self._chk_convert_laz.setChecked(False)
+            return
+        if not _pdal_available():
+            self._chk_convert_laz.setText('Convert LAS to COPC (PDAL is required for LAZ conversion.)')
             self._chk_convert_laz.setEnabled(False)
             self._chk_convert_laz.setChecked(False)
             return
@@ -779,7 +797,7 @@ class WebODMPanel(QDialog):
 
         self._chk_chm.setEnabled(can_chm)
         self._chk_chm.setChecked(can_chm)
-        self._chk_chm.setText('CHM' if can_chm else 'CHM\n(DSM or DTM missing)')
+        self._chk_chm.setText('CHM' if can_chm else 'CHM (DSM or DTM missing)')
 
         # 較正データ(FOL Virtual Shizuoka Export)以外では検証していないため、
         # UI自体を出さない(他由来のデータでは選択肢として見せない)
@@ -787,19 +805,15 @@ class WebODMPanel(QDialog):
         can_custom_vi = self._is_fol_source and can_chm and 'ortho' in self._assets
         self._chk_custom_vi.setEnabled(can_custom_vi)
         self._chk_custom_vi.setChecked(False)
-        self._chk_custom_vi.setText(
-            'Custom Vegetation Index (Prototype)' if can_custom_vi
-            else 'Custom Vegetation Index (Prototype)\n(DSM, DTM and Orthophoto required)'
-        )
+        self._chk_custom_vi.setText('Custom Vegetation Index (Prototype)')
 
         has_pc = 'ept' in self._assets or 'laz' in self._assets
         laz_only = 'laz' in self._assets and 'ept' not in self._assets
+        self._chk_laz.setText('Point cloud')
         if laz_only and not _pdal_available():
-            self._chk_laz.setText('Point cloud\n(PDAL is required for LAZ conversion.)')
             self._chk_laz.setChecked(False)
             self._chk_laz.setEnabled(False)
         else:
-            self._chk_laz.setText('Point cloud')
             self._chk_laz.setChecked(has_pc)
             self._chk_laz.setEnabled(has_pc)
 
@@ -928,17 +942,8 @@ class WebODMPanel(QDialog):
             added.append('Point Cloud')
             self._finish_load_existing(group, added)
         elif 'laz' in assets and self._chk_convert_laz.isChecked():
-            msg = QMessageBox(self)
-            msg.setWindowTitle('Point Cloud')
-            msg.setText(
-                'Converting large LAS files may take a long time.\n'
-                'Do you want to continue?\n'
-                '※ Conversion will be terminated if it does not complete within 10 minutes.'
-            )
-            btn_continue = msg.addButton('Continue', QMessageBox.ButtonRole.AcceptRole)
-            msg.addButton('Skip LAS Conversion', QMessageBox.ButtonRole.RejectRole)
-            msg.exec()
-            if msg.clickedButton() != btn_continue:
+            proceed, timeout_min = self._confirm_point_cloud_timeout('Skip LAS Conversion')
+            if not proceed:
                 self._finish_load_existing(group, added)
                 return
             laz_val = assets['laz']
@@ -948,7 +953,7 @@ class WebODMPanel(QDialog):
             self._progress_bar.setRange(0, 0)
             self._set_running(True)
             self._update_status('Converting Point Cloud…')
-            self._start_copc_worker(laz_val, folder, on_done=self._on_load_copc_done)
+            self._start_copc_worker(laz_val, folder, on_done=self._on_load_copc_done, timeout_min=timeout_min)
         else:
             self._finish_load_existing(group, added)
 
@@ -1209,25 +1214,69 @@ class WebODMPanel(QDialog):
         if pc_layer:
             self._on_copc_done(None, '')
         elif self._run_state['laz']:
-            msg = QMessageBox(self)
-            msg.setWindowTitle('Point Cloud')
-            msg.setText(
-                'Converting large LAS files may take a long time.\n'
-                'Do you want to continue?\n'
-                '※ Conversion will be terminated if it does not complete within 10 minutes.'
-            )
-            btn_continue = msg.addButton('Continue', QMessageBox.ButtonRole.AcceptRole)
-            msg.addButton('Skip Point Cloud', QMessageBox.ButtonRole.RejectRole)
-            msg.exec()
-            if msg.clickedButton() == btn_continue:
+            proceed, timeout_min = self._confirm_point_cloud_timeout('Skip Point Cloud')
+            if proceed:
                 _step('Converting Point Cloud…')
-                self._start_copc_worker(abs_assets['laz'], out_dir)
+                self._start_copc_worker(abs_assets['laz'], out_dir, timeout_min=timeout_min)
             else:
                 self._on_copc_done(None, '')
         else:
             self._on_copc_done(None, '')
 
-    def _start_copc_worker(self, laz_val, out_dir, on_done=None):
+    def _confirm_point_cloud_timeout(self, skip_label):
+        """LAS→COPC 変換の確認ダイアログを表示する。
+        戻り値: (続行するか, タイムアウト分数)。"""
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Point Cloud')
+        lay = QVBoxLayout(dlg)
+
+        lay.addWidget(QLabel(
+            'Converting large LAS files may take a long time.\n'
+            'Do you want to continue?'
+        ))
+        lay.addSpacing(12)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel('Timeout:'))
+        spin = QSpinBox()
+        spin.setRange(1, 180)
+        spin.setValue(10)
+        spin.setSuffix(' min')
+        row.addWidget(spin)
+        lbl_range = QLabel(f'({spin.minimum()}–{spin.maximum()} min)')
+        lbl_range.setStyleSheet('color: gray; font-size: 11px;')
+        row.addWidget(lbl_range)
+        row.addStretch()
+        lay.addLayout(row)
+
+        lbl_note = QLabel()
+        lbl_note.setStyleSheet('color: gray; font-size: 11px;')
+
+        def _update_note(value):
+            lbl_note.setText(
+                f'※ Conversion will be terminated if it does not complete within {value} minutes.'
+            )
+        spin.valueChanged.connect(_update_note)
+        _update_note(spin.value())
+        lay.addWidget(lbl_note)
+        lay.addSpacing(12)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_skip = QPushButton(skip_label)
+        btn_continue = QPushButton('Continue')
+        btn_continue.setDefault(True)
+        btn_row.addWidget(btn_skip)
+        btn_row.addWidget(btn_continue)
+        lay.addLayout(btn_row)
+
+        btn_continue.clicked.connect(dlg.accept)
+        btn_skip.clicked.connect(dlg.reject)
+
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        return accepted, spin.value()
+
+    def _start_copc_worker(self, laz_val, out_dir, on_done=None, timeout_min=10):
         las_paths = laz_val if isinstance(laz_val, list) else [laz_val]
         crs = self._crs_from_las(las_paths[0])
         # LAS に CRS がない場合は同フォルダの DSM/DTM/Orthophoto から取得
@@ -1240,8 +1289,10 @@ class WebODMPanel(QDialog):
         callback = on_done if on_done is not None else self._on_copc_done
         if on_done is None:
             self._run_state['crs'] = crs
+            self._run_state['timeout_min'] = timeout_min
         else:
             self._load_state['crs'] = crs
+            self._load_state['timeout_min'] = timeout_min
 
         if os.path.isfile(copc_path):
             callback(copc_path, '')
@@ -1256,12 +1307,13 @@ class WebODMPanel(QDialog):
             elapsed = int(time.monotonic() - self._copc_start_time)
             m, s = divmod(elapsed, 60)
             self._update_status(
-                f"Converting Point Cloud… {las_total_mb:.0f} MB — {m}:{s:02d} elapsed"
+                f"Converting Point Cloud… {las_total_mb:.0f} MB — "
+                f"{m}:{s:02d} / {timeout_min}:00 elapsed"
             )
         self._copc_timer.timeout.connect(_tick)
         self._copc_timer.start(1000)
 
-        self._copc_worker = _CopcWorker(las_paths, copc_path, self)
+        self._copc_worker = _CopcWorker(las_paths, copc_path, timeout_sec=timeout_min * 60, parent=self)
         self._copc_worker.finished.connect(callback)
         self._copc_worker.start()
 
@@ -1301,9 +1353,13 @@ class WebODMPanel(QDialog):
             state.get('step', lambda _: None)('Loading Point Cloud…')
         elif error:
             if error == 'TIMEOUT':
-                err_msg = 'Point Cloud 変換タイムアウト（10分超過）。ファイルが大きすぎる可能性があります。'
+                timeout_min = state.get('timeout_min', 10)
+                err_msg = (
+                    f'Point Cloud conversion timed out (exceeded {timeout_min} minutes). '
+                    'The file may be too large.'
+                )
             else:
-                err_msg = f'Point Cloud 変換失敗: {error[:200]}'
+                err_msg = f'Point Cloud conversion failed: {error[:200]}'
             QgsMessageLog.logMessage(
                 f'webodm_importer PDAL error:\n{error}', 'webodm_importer', Qgis.MessageLevel.Warning
             )
@@ -1322,7 +1378,10 @@ class WebODMPanel(QDialog):
             if speed_str:
                 done_msg += f'  |  {speed_str}'
             if not copc_path and error:
-                done_msg += '  ※ Point Cloud は失敗'
+                if error == 'TIMEOUT':
+                    done_msg += '  |  Point Cloud timed out'
+                else:
+                    done_msg += '  |  Point Cloud failed'
             self._lbl_run_status.setText(done_msg)
             self._lbl_run_status.setStyleSheet('color: green; font-size: 11px;')
             self._refresh_existing_combo()
@@ -1351,9 +1410,10 @@ class WebODMPanel(QDialog):
                 added.append('Point Cloud')
         elif error:
             if error == 'TIMEOUT':
-                err_msg = 'Point Cloud 変換タイムアウト（10分超過）'
+                timeout_min = state.get('timeout_min', 10)
+                err_msg = f'Point Cloud conversion timed out (exceeded {timeout_min} minutes).'
             else:
-                err_msg = f'Point Cloud 変換失敗: {error[:200]}'
+                err_msg = f'Point Cloud conversion failed: {error[:200]}'
             QgsMessageLog.logMessage(
                 f'webodm_importer PDAL error:\n{error}', 'webodm_importer', Qgis.MessageLevel.Warning
             )

@@ -51,7 +51,42 @@ def detect(folder: str) -> dict:
             )
             if las_files:
                 found['laz'] = [os.path.join(geo_dir, f) for f in las_files]
+    # las_sources.json による相対パス参照（FOL VS Export形式）。
+    # LAS本体はfolderにコピーされないため、.import_meta.jsonに保存された
+    # 元ZIPのパスを起点に相対パスを解決する（Load Existingでの再検出用）。
+    if 'laz' not in found and 'ept' not in found:
+        las_paths = _resolve_las_sources(folder)
+        if las_paths:
+            found['laz'] = las_paths
     return found
+
+
+def _resolve_las_sources(folder: str) -> list:
+    """folder内のlas_sources.jsonと.import_meta.jsonから、元ZIPの場所を
+    起点にLASの絶対パスを解決する。元ファイルが移動・削除済みの場合は
+    見つかったものだけを返す（無ければ空リスト）。"""
+    sources_path = os.path.join(folder, 'las_sources.json')
+    meta_path = os.path.join(folder, '.import_meta.json')
+    if not os.path.isfile(sources_path) or not os.path.isfile(meta_path):
+        return []
+    import json
+    try:
+        with open(meta_path) as f:
+            source = json.load(f).get('source', '')
+        if not source:
+            return []
+        zip_dir = os.path.dirname(source)
+        with open(sources_path) as f:
+            sources = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+    las_paths = []
+    for entry in sources.get('las', []):
+        rel = entry.get('relative', '').replace('\\', '/')
+        abs_path = os.path.normpath(os.path.join(zip_dir, rel))
+        if os.path.isfile(abs_path):
+            las_paths.append(abs_path)
+    return las_paths
 
 
 def detect_from_zip(zip_path: str) -> dict:
