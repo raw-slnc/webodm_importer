@@ -1,5 +1,5 @@
 """
-Custom Vegetation Index (Prototype) — experimental, opt-in, not validated
+Forest Naturalness Index (Prototype) — experimental, opt-in, not validated
 for general use. Kept in its own module, separate from processor.py's
 established functions, so it can be dropped entirely without touching the
 main pipeline.
@@ -13,6 +13,8 @@ import os
 
 import numpy as np
 from osgeo import gdal
+
+from . import processor
 
 
 def _correlate1d(a, kernel, axis):
@@ -67,22 +69,38 @@ def _zoom_nearest(a, out_h, out_w):
     return a[yi][:, xi]
 
 
-def generate_custom_vegetation_index(dsm_path: str, dtm_path: str, ortho_path: str,
-                                     output_path: str) -> str:
+def generate_forest_naturalness_index(dsm_path: str, dtm_path: str, ortho_path: str,
+                                      output_path: str) -> str:
     """Prototype (test feature, not validated for general use).
 
-    Seamlessly pulls VARI toward a low floor value wherever the CHM
-    (DSM-DTM) surface has a low local gradient, as a proxy for artificial
-    flat ground (roads, solar panels, graded clearings) that VARI's color
-    ratio alone cannot distinguish from real vegetation. Uses a per-pixel
-    Sobel gradient, not a windowed statistic, so narrow features like
-    roads aren't blurred out by averaging.
+    Combines two signals to estimate how "natural" (vs. artificially flat or
+    uniform) an area's vegetation structure is:
 
-    Known limitation: gradient magnitude reacts to slope itself, so a
+    - VARI colour ratio from the orthophoto, corrected for a shadow colour
+      cast: open shade is lit mainly by scattered blue skylight rather than
+      direct warm sunlight, which inflates the blue channel and shrinks
+      VARI's denominator (G+R-B), making shadowed green read as more
+      "healthy" than it is. A DSM-derived hillshade (same fixed-angle model
+      as Surface Model*) estimates how shadowed each pixel likely is, and
+      the blue channel's contribution is discounted proportionally. This
+      hillshade does not need to match the real photographed shadow
+      pixel-for-pixel (the ortho is a mosaic stitched from many capture
+      times, so no single sun angle applies to the whole image) — it only
+      needs to flag areas prone to this colour cast.
+    - CHM (DSM-DTM) structural roughness (per-pixel Sobel gradient, not a
+      windowed statistic, so narrow features aren't blurred out): flat areas
+      are pulled toward a low floor value, as a proxy for artificial flat
+      ground (roads, solar panels, graded clearings) that colour alone
+      cannot distinguish from real vegetation; rough areas get a boost
+      weighted by how much colour signal is already present, so it mainly
+      reinforces areas with a real (non-neutral) colour reading rather than
+      inventing one from geometry alone.
+
+    Known limitations: gradient magnitude reacts to slope itself, so a
     uniformly tilted but smooth surface (e.g. a pitched roof) still scores
-    as "rough" and is not suppressed. Thresholds were calibrated against a
-    single solar-panel-vs-forest test site. Assumes DSM, DTM and
-    orthophoto share the same extent, as standard WebODM output does.
+    as "rough". Thresholds were calibrated against a single solar-panel-vs-
+    forest test site. Assumes DSM, DTM and orthophoto share the same
+    extent, as standard WebODM output does.
     """
     _NODATA = -9999.0
 
@@ -104,6 +122,16 @@ def generate_custom_vegetation_index(dsm_path: str, dtm_path: str, ortho_path: s
               outputBounds=(xmin, ymin, xmax, ymax),
               xRes=xres, yRes=yres,
               dstSRS=srs, format='GTiff')
+
+    # Surface Model*と同じ固定角度hillshade（DTMグリッドに揃えたDSM上で計算）
+    tmp_shade = output_path + '.tmp_shade.tif'
+    processor.generate_hillshade(tmp_dsm, tmp_shade)
+    shade_ds = gdal.Open(tmp_shade)
+    shade = shade_ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
+    shade_ds = None
+    if os.path.isfile(tmp_shade):
+        os.remove(tmp_shade)
+
     dsm_ds = gdal.Open(tmp_dsm)
     dsm_band = dsm_ds.GetRasterBand(1)
     dsm = dsm_band.ReadAsArray().astype(np.float32)
@@ -112,14 +140,20 @@ def generate_custom_vegetation_index(dsm_path: str, dtm_path: str, ortho_path: s
     if os.path.isfile(tmp_dsm):
         os.remove(tmp_dsm)
 
-    # DSM/DTM側のnodata(WebODM実測範囲外の飛行境界等)を検出し、方形埋めにしない
-    chm_nodata_mask = ~np.isfinite(dsm) | ~np.isfinite(dtm)
+    # 本当の穴＝DTM自体が無い（地表そのものが不明）場合のみ。
+    dtm_missing = ~np.isfinite(dtm)
     if dtm_nodata_val is not None:
-        chm_nodata_mask |= (dtm == dtm_nodata_val)
+        dtm_missing |= (dtm == dtm_nodata_val)
+    chm_nodata_mask = dtm_missing
+
+    # DSMだけ欠損（河川など写真測量が失敗しやすい箇所）はCHM=0(起伏なし)扱いにする。
+    # DTM(地表)はあるので、「そこに構造物が無い」とみなす方が透明化するより実態に近い。
+    dsm_missing = ~np.isfinite(dsm)
     if dsm_nodata_val is not None:
-        chm_nodata_mask |= (dsm == dsm_nodata_val)
+        dsm_missing |= (dsm == dsm_nodata_val)
 
     chm = dsm - dtm
+    chm[dsm_missing & ~dtm_missing] = 0.0
     chm[~np.isfinite(chm)] = 0.0
 
     gx = _sobel(chm, axis=1) / 8.0
@@ -146,19 +180,41 @@ def generate_custom_vegetation_index(dsm_path: str, dtm_path: str, ortho_path: s
             ortho_nodata_mask = (r == 0) & (g == 0) & (b == 0)
 
     roughness_hi = _zoom_bilinear(roughness, vh, vw)
+    shade_hi = _zoom_bilinear(shade, vh, vw)
     chm_nodata_hi = _zoom_nearest(chm_nodata_mask, vh, vw)
     final_nodata_mask = ortho_nodata_mask | chm_nodata_hi
 
+    # 影は単に暗いだけでなく、直射光(暖色)が遮られ空からの散乱光(青みがかった光)が
+    # 主になるため、Bチャンネルが相対的に強くなる色被りを起こす。VARIの分母(G+R-B)は
+    # Bを引くため、この色被りだけで分母が縮み、影下の緑が実態より健全側(高VARI)に
+    # 出てしまう。シェード(影らしさ)に応じてBの寄与を割り引き、この歪みを補正する。
+    # 単純な明るさの一律な正規化は、r/g/bを同じ値で割るとVARIの比率計算で
+    # 相殺されて無効なため使わない。仮値・未較正。
+    B_CORRECTION = 0.3
+    shadow_amount = np.clip(1.0 - shade_hi / 255.0, 0.0, 1.0)
+    b_corrected = b * (1.0 - B_CORRECTION * shadow_amount)
+
     with np.errstate(divide='ignore', invalid='ignore'):
-        vari = np.nan_to_num((g - r) / (g + r - b)).astype(np.float32)
+        vari = np.nan_to_num((g - r) / (g + r - b_corrected)).astype(np.float32)
     vari = np.clip(vari, -1.0, 1.0)
 
+    # CHMの粗さで連続的に切り替え: 平坦地は健全度を引き下げ(suppress)、
+    # 粗い地形は引き上げる(boost)。どちらも仮値・未較正。
     R_LO, R_HI = 0.029465389251708985, 0.11422117948532105  # ソーラーパネル vs 森林の実地較正値
-    FLOOR = -0.3
-    GRAD = 0.5
+    FLOOR = -0.3  # 平坦地での下限
+    GRAD = 0.5    # 平坦地でのvariの効き具合
+    BOOST = 0.15  # 粗い地形での加算量
     weight = np.clip((roughness_hi - R_LO) / (R_HI - R_LO), 0.0, 1.0)
     suppressed_value = FLOOR + GRAD * vari
-    hybrid = weight * vari + (1.0 - weight) * suppressed_value
+    # 色が中立(白・グレー等、|vari|が小さい)な場所と、既に濃い
+    # (|vari|が1に近い)場所の両方でブーストを弱める非対称の山型の重み。
+    # ピークを|vari|=0.25付近の低めに置き、そこから先(1-|vari|)^3で
+    # 急速に減衰させることで、中〜高VARI域(密な樹冠)が上限付近に
+    # 圧縮されて階調が潰れるのを防ぐ。ピーク値は1になるよう正規化。
+    av = np.abs(vari)
+    color_confidence = (256.0 / 27.0) * av * (1.0 - av) ** 3
+    boosted_value = vari + BOOST * color_confidence
+    hybrid = weight * boosted_value + (1.0 - weight) * suppressed_value
     hybrid = np.clip(hybrid, -1.0, 1.0).astype(np.float32)
     hybrid[final_nodata_mask] = _NODATA
 

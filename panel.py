@@ -201,7 +201,7 @@ class _CopcWorker(QThread):
         _fail(_last_error)
 
 from . import asset_detector, processor
-from . import custom_vegetation_index as custom_vi_module
+from . import custom_vegetation_index as naturalness_module
 
 
 def _pdal_available() -> bool:
@@ -323,10 +323,10 @@ class WebODMPanel(QDialog):
         self._chk_chm.setChecked(True)
         col_opt_right.addWidget(self._chk_chm)
 
-        self._chk_custom_vi = QCheckBox('Custom Vegetation Index (Prototype)')
-        self._chk_custom_vi.setChecked(False)
-        self._chk_custom_vi.setVisible(False)  # ソース未選択時は非FOL扱いで隠す
-        col_opt_right.addWidget(self._chk_custom_vi)
+        self._chk_naturalness = QCheckBox('Forest Naturalness Index (Prototype)')
+        self._chk_naturalness.setChecked(False)
+        self._chk_naturalness.setVisible(False)  # ソース未選択時は非FOL扱いで隠す
+        col_opt_right.addWidget(self._chk_naturalness)
 
         col_opt.addLayout(col_opt_left)
         col_opt.addLayout(col_opt_right)
@@ -801,11 +801,11 @@ class WebODMPanel(QDialog):
 
         # 較正データ(FOL Virtual Shizuoka Export)以外では検証していないため、
         # UI自体を出さない(他由来のデータでは選択肢として見せない)
-        self._chk_custom_vi.setVisible(self._is_fol_source)
-        can_custom_vi = self._is_fol_source and can_chm and 'ortho' in self._assets
-        self._chk_custom_vi.setEnabled(can_custom_vi)
-        self._chk_custom_vi.setChecked(False)
-        self._chk_custom_vi.setText('Custom Vegetation Index (Prototype)')
+        self._chk_naturalness.setVisible(self._is_fol_source)
+        can_naturalness = self._is_fol_source and can_chm and 'ortho' in self._assets
+        self._chk_naturalness.setEnabled(can_naturalness)
+        self._chk_naturalness.setChecked(False)
+        self._chk_naturalness.setText('Forest Naturalness Index (Prototype)')
 
         has_pc = 'ept' in self._assets or 'laz' in self._assets
         laz_only = 'laz' in self._assets and 'ept' not in self._assets
@@ -922,18 +922,18 @@ class WebODMPanel(QDialog):
                 self._add_to_group(layer, group)
                 added.append('CHM')
 
-        # Custom Vegetation Index (prototype)
-        custom_vi_path = derived_assets.get('custom_vegetation_index')
-        if custom_vi_path:
+        # Forest Naturalness Index (prototype)
+        naturalness_path = derived_assets.get('forest_naturalness_index')
+        if naturalness_path:
             layer = QgsRasterLayer(
-                custom_vi_path,
-                self._derived_layer_name('Custom Vegetation Index (Prototype)',
-                                         'custom_vegetation_index', generated_derivatives),
+                naturalness_path,
+                self._derived_layer_name('Forest Naturalness Index (Prototype)',
+                                         'forest_naturalness_index', generated_derivatives),
             )
             if layer.isValid():
                 processor.apply_vegetation_style(layer)
                 self._add_to_group(layer, group)
-                added.append('Custom Vegetation Index')
+                added.append('Forest Naturalness Index')
 
         # Point Cloud (EPT preferred, LAZ fallback)
         if 'ept' in assets:
@@ -1005,7 +1005,7 @@ class WebODMPanel(QDialog):
             + (2 if chk and self._chk_dsm.isChecked() and 'dsm' in a else 0)
             + (2 if chk and 'dtm' in a else 0)
             + (1 if self._chk_chm.isChecked() and 'dsm' in a and 'dtm' in a else 0)
-            + (1 if self._chk_custom_vi.isChecked() and 'dsm' in a and 'dtm' in a and 'ortho' in a else 0)
+            + (1 if self._chk_naturalness.isChecked() and 'dsm' in a and 'dtm' in a and 'ortho' in a else 0)
             + (2 if has_laz_conversion else 1 if self._chk_laz.isChecked() and 'ept' in a else 0)
         )
         self._progress_bar.setRange(0, max(steps, 1))
@@ -1171,19 +1171,19 @@ class WebODMPanel(QDialog):
                 self._add_to_group(layer, group)
                 added.append('CHM')
 
-        # Custom Vegetation Index (prototype)
-        if (self._chk_custom_vi.isChecked() and asset_detector.can_generate_chm(abs_assets)
+        # Forest Naturalness Index (prototype)
+        if (self._chk_naturalness.isChecked() and asset_detector.can_generate_chm(abs_assets)
                 and 'ortho' in abs_assets):
-            custom_vi_path = os.path.join(out_dir, 'custom_vegetation_index.tif')
-            _step('Generating custom vegetation index (prototype)…')
-            custom_vi_module.generate_custom_vegetation_index(
-                abs_assets['dsm'], abs_assets['dtm'], abs_assets['ortho'], custom_vi_path)
-            generated_derivatives.add('custom_vegetation_index')
-            layer = QgsRasterLayer(custom_vi_path, 'Custom Vegetation Index (Prototype)*')
+            naturalness_path = os.path.join(out_dir, 'forest_naturalness_index.tif')
+            _step('Generating forest naturalness index (prototype)…')
+            naturalness_module.generate_forest_naturalness_index(
+                abs_assets['dsm'], abs_assets['dtm'], abs_assets['ortho'], naturalness_path)
+            generated_derivatives.add('forest_naturalness_index')
+            layer = QgsRasterLayer(naturalness_path, 'Forest Naturalness Index (Prototype)*')
             if layer.isValid():
                 processor.apply_vegetation_style(layer)
                 self._add_to_group(layer, group)
-                added.append('Custom Vegetation Index')
+                added.append('Forest Naturalness Index')
 
 
         if self._cancelled:
@@ -1360,6 +1360,7 @@ class WebODMPanel(QDialog):
                 )
             else:
                 err_msg = f'Point Cloud conversion failed: {error[:200]}'
+            # 製作者向けの調査用ログ。UI表示は簡易メッセージのみなので、詳細はここに残す。
             QgsMessageLog.logMessage(
                 f'webodm_importer PDAL error:\n{error}', 'webodm_importer', Qgis.MessageLevel.Warning
             )
@@ -1414,6 +1415,7 @@ class WebODMPanel(QDialog):
                 err_msg = f'Point Cloud conversion timed out (exceeded {timeout_min} minutes).'
             else:
                 err_msg = f'Point Cloud conversion failed: {error[:200]}'
+            # 製作者向けの調査用ログ。UI表示は簡易メッセージのみなので、詳細はここに残す。
             QgsMessageLog.logMessage(
                 f'webodm_importer PDAL error:\n{error}', 'webodm_importer', Qgis.MessageLevel.Warning
             )
