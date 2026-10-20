@@ -342,8 +342,8 @@ class WebODMPanel(QDialog):
         self._chk_naturalness.setVisible(False)  # ソース未選択時は非FOL扱いで隠す
         col_opt_right.addWidget(self._chk_naturalness)
 
-        col_opt.addLayout(col_opt_left)
-        col_opt.addLayout(col_opt_right)
+        col_opt.addLayout(col_opt_left, 1)
+        col_opt.addLayout(col_opt_right, 1)
         lay.addLayout(col_opt)
         main.addWidget(grp)
 
