@@ -17,7 +17,7 @@ import subprocess  # nosec B404
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QCheckBox, QFileDialog,
-    QComboBox, QGroupBox, QProgressBar, QSpinBox,
+    QComboBox, QGroupBox, QProgressBar, QSpinBox, QMessageBox,
 )
 from qgis.PyQt.QtCore import Qt, QThread, QTimer, pyqtSignal, QEventLoop
 import time
@@ -202,6 +202,7 @@ class _CopcWorker(QThread):
 
 from . import asset_detector, processor
 from . import custom_vegetation_index as naturalness_module
+from . import cs_map as cs_map_module
 
 
 def _pdal_available() -> bool:
@@ -306,6 +307,19 @@ class WebODMPanel(QDialog):
         self._chk_dsm = QCheckBox('Surface model (DSM)')
         self._chk_dsm.setChecked(True)
         col_opt_left.addWidget(self._chk_dsm)
+
+        row_cs_map = QHBoxLayout()
+        self._chk_cs_map = QCheckBox('CS Map (terrain)')
+        self._chk_cs_map.setChecked(True)
+        row_cs_map.addWidget(self._chk_cs_map)
+        lbl_cs_map_about = QLabel('<a href="cs_map_about">(about)</a>')
+        lbl_cs_map_about.setStyleSheet('font-size: 11px;')
+        lbl_cs_map_about.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        lbl_cs_map_about.setOpenExternalLinks(False)
+        lbl_cs_map_about.linkActivated.connect(self._show_cs_map_about)
+        row_cs_map.addWidget(lbl_cs_map_about)
+        row_cs_map.addStretch()
+        col_opt_left.addLayout(row_cs_map)
 
         self._chk_laz = QCheckBox('Point cloud')
         self._chk_laz.setChecked(True)
@@ -753,6 +767,17 @@ class WebODMPanel(QDialog):
             self._chk_convert_laz.setChecked(False)
 
     # ── Slots ────────────────────────────────────────
+    def _show_cs_map_about(self, _link=''):
+        QMessageBox.information(
+            self,
+            'About CS Map',
+            'CS topographic visualization was proposed by the Nagano Prefecture\n'
+            'Forestry Research Center.\n\n'
+            'This feature is an independent implementation inspired by that concept.\n\n'
+            'Note: WebODM DTMs are derived from photogrammetry and have low\n'
+            'ground-surface accuracy, especially under forest canopy.',
+        )
+
     def _select_source(self):
         path, _ = QFileDialog.getOpenFileName(
             self, 'Select WebODM ZIP', '', 'ZIP (*.zip)')
@@ -798,6 +823,9 @@ class WebODMPanel(QDialog):
         self._chk_chm.setEnabled(can_chm)
         self._chk_chm.setChecked(can_chm)
         self._chk_chm.setText('CHM' if can_chm else 'CHM (DSM or DTM missing)')
+
+        self._chk_cs_map.setChecked(has_dtm)
+        self._chk_cs_map.setEnabled(has_dtm)
 
         # 較正データ(FOL Virtual Shizuoka Export)以外では検証していないため、
         # UI自体を出さない(他由来のデータでは選択肢として見せない)
@@ -911,6 +939,17 @@ class WebODMPanel(QDialog):
             if layer.isValid():
                 self._add_to_group(layer, group)
 
+        # CS Map
+        cs_map_path = derived_assets.get('cs_map')
+        if cs_map_path:
+            layer = QgsRasterLayer(
+                cs_map_path,
+                self._derived_layer_name('CS Map', 'cs_map', generated_derivatives),
+            )
+            if layer.isValid():
+                self._add_to_group(layer, group)
+                added.append('CS Map')
+
         # CHM
         chm_path = derived_assets.get('chm')
         if chm_path:
@@ -1006,6 +1045,7 @@ class WebODMPanel(QDialog):
             + (2 if chk and 'dtm' in a else 0)
             + (1 if self._chk_chm.isChecked() and 'dsm' in a and 'dtm' in a else 0)
             + (1 if self._chk_naturalness.isChecked() and 'dsm' in a and 'dtm' in a and 'ortho' in a else 0)
+            + (1 if self._chk_cs_map.isChecked() and 'dtm' in a else 0)
             + (2 if has_laz_conversion else 1 if self._chk_laz.isChecked() and 'ept' in a else 0)
         )
         self._progress_bar.setRange(0, max(steps, 1))
@@ -1151,6 +1191,23 @@ class WebODMPanel(QDialog):
             )
             if layer.isValid():
                 self._add_to_group(layer, group)
+
+        # CS Map
+        if self._chk_cs_map.isChecked() and 'dtm' in abs_assets:
+            cs_map_path = os.path.join(out_dir, 'cs_map.tif')
+            _step('Generating CS Map…')
+            try:
+                cs_map_module.generate_cs_map(abs_assets['dtm'], cs_map_path)
+            except Exception as exc:
+                QgsMessageLog.logMessage(
+                    f'webodm_importer CS Map error: {exc}', 'webodm_importer', Qgis.MessageLevel.Warning
+                )
+            else:
+                generated_derivatives.add('cs_map')
+                layer = QgsRasterLayer(cs_map_path, 'CS Map*')
+                if layer.isValid():
+                    self._add_to_group(layer, group)
+                    added.append('CS Map')
 
 
         if self._cancelled:

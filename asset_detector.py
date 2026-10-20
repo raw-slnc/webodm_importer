@@ -31,6 +31,7 @@ DERIVED_ASSET_SPEC = {
     'terrain_model': 'terrain_model.tif',
     'chm':           'chm.tif',
     'forest_naturalness_index': 'forest_naturalness_index.tif',
+    'cs_map':        'cs_map.tif',
 }
 
 
