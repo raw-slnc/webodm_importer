@@ -74,7 +74,9 @@ Place the files in the structure above, then select the dataset folder via the *
 > - `README_LAS_LINKS.txt` — S3 download URLs for the LAS files (for reference)
 >
 > The LAS files must be present at the relative paths listed in `las_sources.json`.
-> If they have been moved or are unavailable, point cloud loading will be skipped.
+> Forestry Operations Lite keeps only the LAS files of its latest export, so for older exports some
+> of them may be gone. If any of them is missing, the point cloud is not created (to avoid an
+> incomplete one) and the reason is shown. A point cloud that was already converted is still loaded.
 
 ## Layer order (in QGIS)
 
@@ -136,8 +138,9 @@ Place the files in the structure above, then select the dataset folder via the *
 
 The dataset (layer group and output folder) is named after the ZIP file. While running, the line
 above the progress bar shows the current step (for example `3/9  Rendering Surface Model…`) and the
-bar shows its progress. When finished, the same area lists the added layers and any layer that could
-not be created, with the reason.
+bar shows its progress. When finished, the same area shows the added layers and the layers that could
+not be created; click **(details)** to read the reasons. The window keeps the same size throughout,
+so longer messages are shortened there and shown in full under (details).
 
 **Surface model (DSM + hillshade)** and **Hillshade (terrain)** are independent:
 Surface model needs only a DSM and makes its own hillshade from it, while Hillshade (terrain)
@@ -150,6 +153,10 @@ To reload a previously imported dataset, select it in the **Load Existing** drop
 **Load**. Datasets already in the layer tree cannot be selected, except when their point cloud is
 missing and can be added: then the button changes to **Add Point Cloud**, which adds only the point cloud to the
 existing group (for example after a conversion timed out).
+
+**Load** also loads the point cloud. A point cloud that was converted before is loaded directly.
+LAS/LAZ files that still need converting ask for the timeout first, as in Run; choose
+**Skip LAS Conversion** to load the other layers only and add the point cloud later.
 
 ## Notes
 

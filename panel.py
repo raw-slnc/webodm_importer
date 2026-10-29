@@ -16,10 +16,11 @@ import subprocess  # nosec B404
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QWidget,
     QLabel, QLineEdit, QPushButton, QCheckBox, QFileDialog,
-    QComboBox, QGroupBox, QProgressBar, QSpinBox, QMessageBox, QLayout,
+    QComboBox, QGroupBox, QProgressBar, QSpinBox, QMessageBox,
+    QApplication, QScrollArea, QFrame, QStyle,
 )
 from qgis.PyQt.QtCore import Qt, QThread, QTimer, pyqtSignal, QEventLoop, QEvent
-from qgis.PyQt.QtGui import QIcon
+from qgis.PyQt.QtGui import QIcon, QGuiApplication, QFont, QFontMetrics
 import time
 from qgis.core import QgsPointCloudLayer, QgsRasterLayer, QgsProject, QgsMessageLog, Qgis
 
@@ -226,54 +227,140 @@ class _AutoRefreshCombo(QComboBox):
         super().showPopup()
 
 
-class _WrapLabel(QLabel):
-    """折り返し表示のラベル。パネルは中身に合わせて大きさを固定しているが、
-    Qt はその計算に折り返し後の高さを入れないため、文字が変わるたびに
-    必要な高さを自分で求めて最低高さにする（行が増えればパネルが伸びる）。
-    reserve_lines を指定すると、その行数分の高さを常に確保する（短い表示や
-    空のときにパネルの高さが変わらない。超える長さのときだけ伸びる）。"""
-    def __init__(self, text='', parent=None, reserve_lines=0):
-        super().__init__(text, parent)
-        self._reserve_lines = reserve_lines
-        self.setWordWrap(True)
-        self._fit()
+class _StatusLabel(QLabel):
+    """行数を固定したステータス表示。ウィンドウの大きさは開いたときの環境（文字の
+    大きさ・表示倍率）から一度だけ決めて変えないため、表示は lines 行に収める。
+    折り返しても収まらない分は最後の行を「…」で省き、(details) から全文を読めるようにする。"""
+    _LINK = '(details)'
 
-    def setText(self, text):
-        super().setText(text)
-        self._fit()
+    def __init__(self, text='', lines=2, elide=Qt.TextElideMode.ElideRight, details_link=True,
+                 parent=None):
+        super().__init__(parent)
+        self._lines = lines
+        self._elide = elide
+        self._details_link = details_link
+        self._message = ''
+        self._details = ''
+        self.setTextFormat(Qt.TextFormat.RichText)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self.setOpenExternalLinks(False)
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.linkActivated.connect(self._show_details)
+        self._fix_height()
+        self.set_message(text)
+
+    def _fix_height(self):
+        # 実際の表示（リッチテキスト）と同じ方法で、lines 行分の高さを測って固定する
+        self.ensurePolished()
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        QLabel.setText(self, '<br>'.join(['Xy_g'] * self._lines))
+        self.setFixedHeight(self.sizeHint().height())
 
     def setStyleSheet(self, style):
         super().setStyleSheet(style)
-        self._fit()
+        self._fix_height()
+        self._render()
+
+    def setText(self, text):
+        self.set_message(text)
+
+    def text(self):
+        return self._message
+
+    def set_message(self, text, details=''):
+        """text は表示する文（改行で区切ってよい）。details は (details) で見せる全文。"""
+        self._message = text or ''
+        self._details = details or ''
+        self._render()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._fit()
+        self._render()
 
-    def _reserved_height(self):
-        if self._reserve_lines <= 0:
-            return 0
-        self.ensurePolished()
-        fm = self.fontMetrics()
-        margins = self.contentsMargins()
-        return (fm.height() + fm.lineSpacing() * (self._reserve_lines - 1)
-                + margins.top() + margins.bottom() + 2 * self.margin())
+    def _wrap(self, fm, width):
+        rows = []
+        for line in self._message.split('\n'):
+            if self._elide != Qt.TextElideMode.ElideRight:
+                rows.append(line)
+                continue
+            row = ''
+            for word in line.split(' '):
+                candidate = f'{row} {word}' if row else word
+                if row and fm.horizontalAdvance(candidate) > width:
+                    rows.append(row)
+                    row = word
+                else:
+                    row = candidate
+            rows.append(row)
+        return rows
 
-    def _fit(self):
+    def _render(self):
+        import html
         width = self.contentsRect().width()
-        text_height = self.heightForWidth(width) if (self.text() and width > 0) else 0
-        height = max(text_height, self._reserved_height())
-        if height != self.minimumHeight():
-            self.setMinimumHeight(max(height, 0))
-            # 固定サイズの再計算は通常1回遅れて反映されるため、その場で行う
-            top_layout = self.window().layout()
-            if top_layout is not None:
-                top_layout.invalidate()
-                top_layout.activate()
+        if width <= 0 or not self._message:
+            QLabel.setText(self, '')
+            return
+        fm = self.fontMetrics()
+        rows = self._wrap(fm, width)
+        shown = rows[:self._lines]
+        overflow = len(rows) > self._lines or any(fm.horizontalAdvance(r) > width for r in shown)
+        need_link = self._details_link and (overflow or bool(self._details))
+        link_width = fm.horizontalAdvance(' ' + self._LINK) if need_link else 0
+        out = []
+        for n, row in enumerate(shown):
+            last = n == len(shown) - 1
+            avail = width - (link_width if last else 0)
+            if last and len(rows) > self._lines:
+                row = row + ' …'
+            text = fm.elidedText(row, self._elide, max(avail, 10))
+            out.append(html.escape(text))
+        if need_link:
+            out[-1] += f' <a href="details">{self._LINK}</a>'
+        QLabel.setText(self, '<br>'.join(out))
+
+    def _show_details(self, _link=''):
+        QMessageBox.information(self.window(), 'Details', self._details or self._message)
+
+
+# FOL は最新の Export 分の LAS しか残さないため、古いデータでは LAS が欠けることがある
+_FOL_LAS_MISSING_MSG = (
+    'The LAS files for this dataset are no longer available (Forestry Operations Lite keeps only '
+    'those of its latest export), so its point cloud cannot be created. Export again from '
+    'Forestry Operations Lite, or download them using README_LAS_LINKS.txt.'
+)
+
+
+# 注記・ステータスの文字は、QGIS の文字の大きさに対する割合で決める（固定の px にしない）。
+# QGIS のフォント設定や表示倍率を変えても、本文との大小関係を保ったまま連動する。
+_NOTE_FONT_RATIO = 0.9
+
+
+def _note_font_css():
+    font = QApplication.font()
+    if font.pointSizeF() > 0:
+        return f'font-size: {font.pointSizeF() * _NOTE_FONT_RATIO:.1f}pt;'
+    return f'font-size: {max(1, round(font.pixelSize() * _NOTE_FONT_RATIO))}px;'
 
 
 def _note_style(color='gray'):
-    return f'color: {color}; font-size: 11px;'
+    return f'color: {color}; {_note_font_css()}'
+
+
+def _options_css():
+    """Options のチェックボックス：文字は注記と同じ割合、チェックの四角も文字に合わせる。"""
+    base = QFont(QApplication.font())
+    font = QFont(base)
+    if font.pointSizeF() > 0:
+        font.setPointSizeF(font.pointSizeF() * _NOTE_FONT_RATIO)
+    else:
+        font.setPixelSize(max(1, round(font.pixelSize() * _NOTE_FONT_RATIO)))
+    # QGIS が本来描く四角の大きさを、文字が小さくなる割合だけ縮める
+    native = QApplication.style().pixelMetric(QStyle.PixelMetric.PM_IndicatorWidth)
+    scale = QFontMetrics(font).height() / max(1, QFontMetrics(base).height())
+    box = max(8, round(native * scale))
+    return (f'QCheckBox {{ {_note_font_css()} }} '
+            f'QCheckBox::indicator {{ width: {box}px; height: {box}px; }}')
 
 
 class WebODMPanel(QDialog):
@@ -302,12 +389,20 @@ class WebODMPanel(QDialog):
         self._assets = {}
         self._is_fol_source = False
 
-        main = QVBoxLayout(self)
+        # 中身はスクロール領域に入れる。ふだんはウィンドウが中身ちょうどの大きさなので
+        # スクロールバーは出ず、画面が小さくて収まらないときだけ縦にスクロールできる。
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self._scroll = QScrollArea()
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setWidgetResizable(True)
+        content = QWidget()
+        self._scroll.setWidget(content)
+        outer.addWidget(self._scroll)
+
+        main = QVBoxLayout(content)
         main.setContentsMargins(8, 8, 8, 8)
         main.setSpacing(6)
-        # 大きさは中身に合わせて固定（利用者のドラッグでは変わらない）。
-        # 表示倍率や文字サイズが違っても、必要な大きさを Qt が計算する。
-        main.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
 
         # ── Source ─────────────────────────────────
         grp = QGroupBox('Source')
@@ -355,14 +450,17 @@ class WebODMPanel(QDialog):
         # ── Output ─────────────────────────────────
         grp = QGroupBox('Output')
         lay = QVBoxLayout(grp)
-        self._lbl_out_path = _WrapLabel('(auto-set when project is saved)')
+        # 長いパスは途中を省く（全体はマウスを重ねると表示）
+        self._lbl_out_path = _StatusLabel('(auto-set when project is saved)', lines=1,
+                                          elide=Qt.TextElideMode.ElideMiddle, details_link=False)
         self._lbl_out_path.setStyleSheet(_note_style())
-        self._lbl_out_path.setWordWrap(True)
         lay.addWidget(self._lbl_out_path)
         main.addWidget(grp)
 
         # ── Options (2-column) ─────────────────────
         grp = QGroupBox('Options')
+        self._options_group = grp
+        grp.setStyleSheet(_options_css())
         lay = QVBoxLayout(grp)
         col_opt = QHBoxLayout()
         col_opt_left  = QVBoxLayout()
@@ -383,7 +481,7 @@ class WebODMPanel(QDialog):
         self._chk_cs_map.setChecked(True)
         row_cs_map.addWidget(self._chk_cs_map)
         self._lbl_cs_map_about = QLabel('<a href="cs_map_about">(about)</a>')
-        self._lbl_cs_map_about.setStyleSheet('font-size: 11px;')
+        self._lbl_cs_map_about.setStyleSheet(_note_font_css())
         self._lbl_cs_map_about.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
         self._lbl_cs_map_about.setOpenExternalLinks(False)
         self._lbl_cs_map_about.linkActivated.connect(self._show_cs_map_about)
@@ -412,6 +510,10 @@ class WebODMPanel(QDialog):
         self._chk_naturalness = QCheckBox('Forest Naturalness Index (Prototype)')
         self._chk_naturalness.setChecked(False)
         self._chk_naturalness.setVisible(False)  # ソース未選択時は非FOL扱いで隠す
+        # 隠していても場所は確保しておく（FOL 由来で現れたときに高さが変わらない）
+        policy = self._chk_naturalness.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        self._chk_naturalness.setSizePolicy(policy)
         col_opt_right.addWidget(self._chk_naturalness)
 
         col_opt.addLayout(col_opt_left, 1)
@@ -442,12 +544,8 @@ class WebODMPanel(QDialog):
         self._btn_load.clicked.connect(self._load_existing)
         row_existing.addWidget(self._btn_load)
         lay.addLayout(row_existing)
-        self._chk_convert_laz = QCheckBox('Convert LAS to COPC')
-        self._chk_convert_laz.setEnabled(False)
-        lay.addWidget(self._chk_convert_laz)
-        self._lbl_existing_status = _WrapLabel(reserve_lines=2)
+        self._lbl_existing_status = _StatusLabel(lines=2)
         self._lbl_existing_status.setStyleSheet(_note_style())
-        self._lbl_existing_status.setWordWrap(True)
         lay.addWidget(self._lbl_existing_status)
         main.addWidget(grp)
 
@@ -457,13 +555,12 @@ class WebODMPanel(QDialog):
 
         # ステータス（実行中は処理内容と％、終了後は結果）
         self._lbl_progress_step = QLabel()
-        self._lbl_progress_step.setStyleSheet('font-size: 11px;')
-        self._lbl_progress_step.setVisible(False)
+        self._lbl_progress_step.setStyleSheet(_note_font_css())
+        # 処理内容の行は常に置いておく（待機中は空）。高さは _fix_line_heights で固定する。
         lay.addWidget(self._lbl_progress_step)
 
-        self._lbl_run_status = _WrapLabel()
-        self._lbl_run_status.setWordWrap(True)
-        self._lbl_run_status.setStyleSheet('font-size: 11px;')
+        self._lbl_run_status = _StatusLabel(lines=2)
+        self._lbl_run_status.setStyleSheet(_note_font_css())
         lay.addWidget(self._lbl_run_status)
 
         # 進捗バー｜Run/Stop
@@ -497,7 +594,15 @@ class WebODMPanel(QDialog):
         width_keeper.setFixedSize(self.PANEL_WIDTH - 16, 0)
         main.addWidget(width_keeper)
 
-        self._combo_existing.currentIndexChanged.connect(self._update_convert_laz_checkbox)
+        # 大きさは環境（文字の大きさ・表示倍率・画面）から決めて固定する。中身では伸び縮み
+        # しない（ステータス欄は行数を固定し、後から出る表示は場所を確保済み）。環境が
+        # 変わったときだけ計算し直す（_on_environment_changed）。
+        self._refreshing_metrics = False
+        self._watched_screen = None
+        self._fix_line_heights()
+        self._update_window_size()
+
+        self._combo_existing.currentIndexChanged.connect(self._on_existing_selected)
         self._refresh_existing_combo()
 
     # ── Helpers ─────────────────────────────────────
@@ -639,174 +744,12 @@ class WebODMPanel(QDialog):
             pass
         return None
 
-    def _load_point_cloud(self, laz_val, out_dir):
-        """LAS/LAZ をポイントクラウドレイヤーとして返す。複数ファイルは結合 COPC に変換する。"""
-        las_paths = laz_val if isinstance(laz_val, list) else [laz_val]
-        crs = self._crs_from_las(las_paths[0])
-
-        # 単一ファイルは直接読み込みを試みる
-        if len(las_paths) == 1:
-            for provider in ('pdal', 'copc'):
-                layer = QgsPointCloudLayer(las_paths[0], 'Point Cloud', provider)
-                if layer.isValid():
-                    if crs and crs.isValid() and not layer.crs().isValid():
-                        layer.setCrs(crs)
-                    return layer
-
-        copc_path = self._convert_to_copc(las_paths, out_dir)
-        if copc_path:
-            layer = QgsPointCloudLayer(copc_path, 'Point Cloud', 'copc')
-            if layer.isValid():
-                if crs and crs.isValid() and not layer.crs().isValid():
-                    layer.setCrs(crs)
-                return layer
-        return None
-
-    def _convert_to_copc(self, las_paths, out_dir):
-        """PDAL CLI で LAS/LAZ（単数または複数）→ COPC 変換。変換済みなら再利用する。"""
-        las_paths = las_paths if isinstance(las_paths, list) else [las_paths]
-        pc_cache = os.path.join(out_dir, 'pc_cache')
-        os.makedirs(pc_cache, exist_ok=True)
-        base = os.path.splitext(os.path.basename(las_paths[0]))[0] if len(las_paths) == 1 else 'merged'
-        copc_path = os.path.join(pc_cache, base + '.copc.laz')
-        if os.path.isfile(copc_path):
-            return copc_path
-
-        _uid = uuid.uuid4().hex[:8]
-        _tmp_inputs = []
-
-        def _short(p):
-            if sys.platform != 'win32':
-                return p
-            try:
-                import ctypes
-                buf = ctypes.create_unicode_buffer(1024)
-                ctypes.windll.kernel32.GetShortPathNameW(p, buf, 1024)
-                return buf.value or p
-            except Exception:
-                return p
-
-        def _safe_input(p, idx):
-            short = _short(p)
-            if sys.platform != 'win32' or all(ord(c) < 128 for c in short):
-                return short
-            ext = os.path.splitext(p)[1].lower()
-            dst = os.path.join(tempfile.gettempdir(), f'pdal_in_{_uid}_{idx}{ext}')
-            try:
-                os.link(p, dst)
-            except OSError:
-                shutil.copy2(p, dst)
-            _tmp_inputs.append(dst)
-            return dst
-
-        def _cleanup():
-            for f in _tmp_inputs:
-                try:
-                    os.remove(f)
-                except OSError:
-                    pass
-
-        _win_flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-
-        if sys.platform == 'win32':
-            tmp_copc = os.path.join(tempfile.gettempdir(), f'pdal_tmp_{_uid}.copc.laz')
-        else:
-            tmp_copc = copc_path
-
-        safe_paths = [_safe_input(p, i) for i, p in enumerate(las_paths)]
-
-        def _finalize():
-            if tmp_copc != copc_path and os.path.isfile(tmp_copc):
-                shutil.move(tmp_copc, copc_path)
-
-        if len(safe_paths) == 1:
-            pipeline = {"pipeline": safe_paths + [
-                {"type": "writers.copc", "filename": tmp_copc},
-            ]}
-            try:
-                r = subprocess.run(  # nosec B603, B607
-                    ['pdal', 'pipeline', '--stdin'],
-                    input=json.dumps(pipeline),
-                    capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
-                    creationflags=_win_flags,
-                )
-                if r.returncode == 0 and os.path.isfile(tmp_copc):
-                    _finalize()
-                    _cleanup()
-                    return copc_path
-                # フォールバック: Global Encoding WKT フラグ未設定の LAS 1.4 ファイル対策
-                if r.returncode != 0:
-                    pipeline_nosrs = {"pipeline": [
-                        {"type": "readers.las", "filename": safe_paths[0], "nosrs": True},
-                        {"type": "writers.copc", "filename": tmp_copc},
-                    ]}
-                    r2 = subprocess.run(  # nosec B603, B607
-                        ['pdal', 'pipeline', '--stdin'],
-                        input=json.dumps(pipeline_nosrs),
-                        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
-                        creationflags=_win_flags,
-                    )
-                    if r2.returncode == 0 and os.path.isfile(tmp_copc):
-                        _finalize()
-                        _cleanup()
-                        return copc_path
-            except Exception:  # nosec B110
-                pass
-        else:
-            if sys.platform == 'win32':
-                tmp_las = os.path.join(tempfile.gettempdir(), f'pdal_tmp_{_uid}.las')
-            else:
-                tmp_las = copc_path + '.tmp.las'
-            try:
-                merge_pipeline = {"pipeline": safe_paths + [
-                    {"type": "filters.merge"},
-                    {"type": "writers.las", "filename": tmp_las},
-                ]}
-                r = subprocess.run(  # nosec B603, B607
-                    ['pdal', 'pipeline', '--stdin'],
-                    input=json.dumps(merge_pipeline),
-                    capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
-                    creationflags=_win_flags,
-                )
-                if r.returncode == 0 and os.path.isfile(tmp_las):
-                    copc_pipeline = {"pipeline": [
-                        tmp_las,
-                        {"type": "writers.copc", "filename": tmp_copc},
-                    ]}
-                    r = subprocess.run(  # nosec B603, B607
-                        ['pdal', 'pipeline', '--stdin'],
-                        input=json.dumps(copc_pipeline),
-                        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
-                        creationflags=_win_flags,
-                    )
-                    if r.returncode == 0 and os.path.isfile(tmp_copc):
-                        _finalize()
-                        _cleanup()
-                        return copc_path
-            except Exception:  # nosec B110
-                pass
-            finally:
-                if os.path.isfile(tmp_las):
-                    os.remove(tmp_las)
-        _cleanup()
-        return None
-
     def _add_to_group(self, layer, group):
         QgsProject.instance().addMapLayer(layer, False)
         group.addLayer(layer)
         node = group.findLayer(layer.id())
         if node:
             node.setExpanded(False)
-
-    def _remove_group(self, name):
-        root = QgsProject.instance().layerTreeRoot()
-        group = root.findGroup(name)
-        if not group:
-            return
-        layer_ids = [child.layerId() for child in group.findLayers()]
-        root.removeChildNode(group)
-        for lid in layer_ids:
-            QgsProject.instance().removeMapLayer(lid)
 
     def _refresh_existing_combo(self):
         from qgis.PyQt.QtGui import QColor
@@ -837,31 +780,59 @@ class WebODMPanel(QDialog):
         base_name = 'merged' if len(las_paths) > 1 else os.path.splitext(os.path.basename(las_paths[0]))[0]
         return os.path.join(folder, 'pc_cache', base_name + '.copc.laz')
 
+    def _laz_for_folder(self, folder, assets):
+        """読み込みに使う LAS/LAZ の一覧。EPT があれば None。
+        FOL 由来で LAS が欠けていても、変換済みの点群が残っていればそれを使う。"""
+        if 'ept' in assets:
+            return None
+        if 'laz' in assets:
+            return assets['laz']
+        las_paths, missing = asset_detector.fol_las_status(folder)
+        if las_paths and missing and os.path.isfile(self._copc_cache_path(folder, las_paths)):
+            return las_paths
+        return None
+
+    def _fol_las_unavailable(self, folder, assets):
+        """FOL 由来で LAS が欠けていて、変換済みの点群も無い（点群を作れない）か。"""
+        if 'ept' in assets or self._laz_for_folder(folder, assets):
+            return False
+        _, missing = asset_detector.fol_las_status(folder)
+        return bool(missing)
+
     def _point_cloud_source(self, folder):
         """('ept', path) / ('laz', paths) / None。LAS は変換済みキャッシュか PDAL が必要。"""
         assets = asset_detector.detect(folder)
         if 'ept' in assets:
             return 'ept', assets['ept']
-        if 'laz' in assets:
-            if _pdal_available() or os.path.isfile(self._copc_cache_path(folder, assets['laz'])):
-                return 'laz', assets['laz']
+        laz = self._laz_for_folder(folder, assets)
+        if laz and (_pdal_available() or os.path.isfile(self._copc_cache_path(folder, laz))):
+            return 'laz', laz
         return None
 
     def _can_add_point_cloud(self, folder, group):
         return not self._group_has_point_cloud(group) and self._point_cloud_source(folder) is not None
 
-    def _update_convert_laz_checkbox(self):
-        self._chk_convert_laz.setText('Convert LAS to COPC')
+    def _on_existing_selected(self):
+        """Load Existing でデータを選んだとき：前の表示を消し、点群を作れない理由があれば出す。"""
+        self._set_status(self._lbl_existing_status, '', 'gray')
+        self._update_load_button()
+        selected = self._combo_existing.currentText()
+        base = self._output_base()
+        if selected == '— select —' or not base:
+            return
+        folder = os.path.join(base, selected)
+        if self._fol_las_unavailable(folder, asset_detector.detect(folder)):
+            self._set_status(self._lbl_existing_status,
+                             'The LAS files for this dataset are no longer available, so its '
+                             'point cloud cannot be created.', 'orange', _FOL_LAS_MISSING_MSG)
+
+    def _update_load_button(self):
+        """Load Existing のボタン：読み込み済みで点群だけ欠けていれば Add Point Cloud。"""
         self._btn_load.setText('Load')
         self._btn_load.setEnabled(not getattr(self, '_running', False))
         selected = self._combo_existing.currentText()
-        if selected == '— select —':
-            self._chk_convert_laz.setEnabled(False)
-            self._chk_convert_laz.setChecked(False)
-            return
         base = self._output_base()
-        if not base:
-            self._chk_convert_laz.setEnabled(False)
+        if selected == '— select —' or not base:
             return
         folder = os.path.join(base, selected)
         group = QgsProject.instance().layerTreeRoot().findGroup(selected)
@@ -871,26 +842,6 @@ class WebODMPanel(QDialog):
                 self._btn_load.setText('Add Point Cloud')
             else:
                 self._btn_load.setEnabled(False)
-            self._chk_convert_laz.setEnabled(False)
-            self._chk_convert_laz.setChecked(False)
-            return
-        assets = asset_detector.detect(folder)
-        has_laz = 'laz' in assets and 'ept' not in assets
-        if not has_laz:
-            self._chk_convert_laz.setEnabled(False)
-            self._chk_convert_laz.setChecked(False)
-            return
-        if not _pdal_available():
-            self._chk_convert_laz.setText('Convert LAS to COPC (PDAL is required for LAZ conversion.)')
-            self._chk_convert_laz.setEnabled(False)
-            self._chk_convert_laz.setChecked(False)
-            return
-        if os.path.isfile(self._copc_cache_path(folder, assets['laz'])):
-            self._chk_convert_laz.setEnabled(False)
-            self._chk_convert_laz.setChecked(False)
-        else:
-            self._chk_convert_laz.setEnabled(True)
-            self._chk_convert_laz.setChecked(False)
 
     def eventFilter(self, obj, event):
         if obj is self._chk_cs_map and event.type() == QEvent.Type.EnabledChange:
@@ -901,6 +852,125 @@ class WebODMPanel(QDialog):
                 '<a href="cs_map_about">(about)</a>' if enabled
                 else '<span style="color: gray;">(about)</span>')
         return super().eventFilter(obj, event)
+
+    # ── 大きさの確保（環境に合わせる） ──────────────
+    def _fix_line_heights(self):
+        """1行表示の欄の高さを、今の文字の大きさで固定する。"""
+        # 検出後の ✅/❌ は文字によって行の高さが変わりうるので、大きい方で固定する
+        for key, lbl in self._asset_labels.items():
+            text = lbl.text()
+            label = asset_detector.ASSET_LABELS[key]
+            lbl.setMinimumHeight(0)
+            lbl.setMaximumHeight(16777215)
+            heights = []
+            for prefix in ('— ', '✅ ', '❌ '):
+                lbl.setText(f'{prefix}{label}')
+                heights.append(lbl.sizeHint().height())
+            lbl.setText(text)
+            lbl.setFixedHeight(max(heights))
+        # 処理内容の行：空だと 1px 低くなるため、文字があるときの高さで固定する
+        step = self._lbl_progress_step
+        text = step.text()
+        step.setMinimumHeight(0)
+        step.setMaximumHeight(16777215)
+        step.setText('0/0')
+        step.ensurePolished()
+        step.setFixedHeight(step.sizeHint().height())
+        step.setText(text)
+
+    def _target_screen(self):
+        if self.isVisible() and self.screen() is not None:
+            return self.screen()
+        main_window = self.iface.mainWindow()
+        if main_window is not None and main_window.screen() is not None:
+            return main_window.screen()
+        return QGuiApplication.primaryScreen()
+
+    def _update_window_size(self):
+        """中身ちょうどの大きさで固定する。画面に収まらないときだけ縮めて、
+        中身をスクロールできるようにする（利用者の操作では変えられない）。"""
+        content = self._scroll.widget()
+        content.adjustSize()
+        hint = content.sizeHint()
+        width, height = hint.width(), hint.height()
+        avail = self._target_screen().availableGeometry()
+        if self.isVisible():
+            frame_w = self.frameGeometry().width() - self.geometry().width()
+            frame_h = self.frameGeometry().height() - self.geometry().height()
+        else:
+            frame_w, frame_h = 0, 0
+        if frame_h <= 0:
+            # 表示前はタイトルバーと枠の大きさが分からないので、スタイルから見積もる
+            frame_h = self.style().pixelMetric(QStyle.PixelMetric.PM_TitleBarHeight) + 8
+            frame_w = 8
+        max_w = avail.width() - frame_w
+        max_h = avail.height() - frame_h
+        bar = self.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent)
+        if height > max_h:
+            height = max_h
+            width += bar
+        if width > max_w:
+            width = max_w
+            height = min(height + bar, max_h)
+        self.setFixedSize(width, height)
+        if self.isVisible():
+            # はみ出して開いている場合は、画面の中に戻す
+            frame = self.frameGeometry()
+            x = min(max(frame.left(), avail.left()), avail.right() - frame.width() + 1)
+            y = min(max(frame.top(), avail.top()), avail.bottom() - frame.height() + 1)
+            if (x, y) != (frame.left(), frame.top()):
+                self.move(x, y)
+
+    def _on_environment_changed(self, *_args):
+        """フォント・表示倍率・画面が変わったとき：文字の大きさと確保する高さを計算し直す。"""
+        if self._refreshing_metrics:
+            return
+        self._refreshing_metrics = True
+        try:
+            css = _note_font_css()
+            for widget in [self] + self.findChildren(QWidget):
+                style = widget.styleSheet()
+                if 'font-size' in style:
+                    widget.setStyleSheet(re.sub(r'font-size:[^;]*;', css, style))
+            self._options_group.setStyleSheet(_options_css())
+            self._fix_line_heights()
+            self._update_window_size()
+        finally:
+            self._refreshing_metrics = False
+
+    def _watch_screen(self, screen):
+        if screen is self._watched_screen:
+            return
+        if self._watched_screen is not None:
+            try:
+                self._watched_screen.logicalDotsPerInchChanged.disconnect(self._on_environment_changed)
+                self._watched_screen.availableGeometryChanged.disconnect(self._on_environment_changed)
+            except (TypeError, RuntimeError):
+                pass
+        self._watched_screen = screen
+        if screen is not None:
+            screen.logicalDotsPerInchChanged.connect(self._on_environment_changed)
+            screen.availableGeometryChanged.connect(self._on_environment_changed)
+
+    def _on_screen_changed(self, screen):
+        self._watch_screen(screen)
+        self._on_environment_changed()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        handle = self.windowHandle()
+        if handle is not None and not getattr(self, '_screen_hooked', False):
+            handle.screenChanged.connect(self._on_screen_changed)
+            self._screen_hooked = True
+            self._watch_screen(handle.screen())
+            # 表示後は実際の枠の大きさが分かるので、画面に収まるかを測り直す
+            QTimer.singleShot(0, self._update_window_size)
+
+    def event(self, event):
+        # QGIS の設定でアプリ全体のフォントが変わったとき
+        if event.type() == QEvent.Type.ApplicationFontChange:
+            QTimer.singleShot(0, self._on_environment_changed)
+        return super().event(event)
 
     def center_on_main_window(self):
         """QGIS のメイン画面の中央に置く（初回表示用）。"""
@@ -993,6 +1063,12 @@ class WebODMPanel(QDialog):
         else:
             self._chk_laz.setChecked(has_pc)
             self._chk_laz.setEnabled(has_pc)
+        if not has_pc and self._is_fol_source:
+            # FOL は最新の Export 分の LAS しか残さないため、古い ZIP では欠けることがある
+            status = (asset_detector.fol_las_status_from_zip(self._source_path) if self._is_zip
+                      else asset_detector.fol_las_status(self._source_path))
+            if status[1]:
+                self._chk_laz.setText('Point cloud (LAS files not found)')
 
         base = self._output_base()
         if base:
@@ -1048,6 +1124,7 @@ class WebODMPanel(QDialog):
         derived_assets = asset_detector.detect_derived(folder)
         generated_derivatives = self._load_generated_derivatives(folder, derived_assets)
 
+        laz = self._laz_for_folder(folder, assets)
         group = root.insertGroup(0, selected)
         paths = {k: v for k, v in assets.items() if k in ('ortho', 'dsm', 'dtm')}
         paths.update(derived_assets)
@@ -1059,7 +1136,18 @@ class WebODMPanel(QDialog):
             self._add_to_group(layer, group)
             added.append('Point Cloud')
             self._finish_load_existing(group, added)
-        elif 'laz' in assets and self._chk_convert_laz.isChecked():
+        elif laz and os.path.isfile(self._copc_cache_path(folder, laz)):
+            # 変換済み：確認なしでそのまま読み込む
+            self._load_state = {'group': group, 'added': added, 'folder': folder}
+            self._start_copc_worker(laz, folder, on_done=self._on_load_copc_done)
+        elif laz and not _pdal_available():
+            self._finish_load_existing(
+                group, added, error='Not added: Point Cloud (PDAL is required)',
+                details='LAS/LAZ point clouds are converted to COPC with the pdal command-line '
+                        'tool, which was not found. Install PDAL, then use Load Existing → '
+                        'Add Point Cloud.')
+        elif laz:
+            # 未変換：Run と同じく、タイムアウトを確認してから変換する（Skip で点群なし）
             proceed, timeout_min = self._confirm_point_cloud_timeout('Skip LAS Conversion')
             if not proceed:
                 self._finish_load_existing(group, added)
@@ -1068,7 +1156,7 @@ class WebODMPanel(QDialog):
             self._set_status(self._lbl_existing_status,
                              'Converting Point Cloud… (progress is shown under Run)', 'gray')
             self._begin_point_cloud_progress()
-            self._start_copc_worker(assets['laz'], folder, on_done=self._on_load_copc_done,
+            self._start_copc_worker(laz, folder, on_done=self._on_load_copc_done,
                                     timeout_min=timeout_min)
         else:
             self._finish_load_existing(group, added)
@@ -1105,14 +1193,13 @@ class WebODMPanel(QDialog):
         self._btn_stop.setEnabled(running)
         # バーは常に表示して行の配置を固定し、実行中だけ％を出す
         self._progress_bar.setTextVisible(running)
-        self._lbl_progress_step.setVisible(running)
         if running:
             self._btn_load.setEnabled(False)
         else:
             self._progress_bar.setRange(0, 100)
             self._progress_bar.setValue(0)
             self._lbl_progress_step.setText('')
-            self._update_convert_laz_checkbox()
+            self._update_load_button()
 
     def _cancel(self):
         self._cancelled = True
@@ -1137,9 +1224,9 @@ class WebODMPanel(QDialog):
         self._lbl_run_status.setText(text)
         QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
 
-    def _set_status(self, label, text, color):
-        label.setText(text)
-        label.setStyleSheet(f'color: {color}; font-size: 11px;')
+    def _set_status(self, label, text, color, details=''):
+        label.setStyleSheet(_note_style(color))
+        label.set_message(text, details)
 
     def _run(self):
         base = self._output_base()
@@ -1253,13 +1340,13 @@ class WebODMPanel(QDialog):
         spin.setSuffix(' min')
         row.addWidget(spin)
         lbl_range = QLabel(f'({spin.minimum()}–{spin.maximum()} min)')
-        lbl_range.setStyleSheet('color: gray; font-size: 11px;')
+        lbl_range.setStyleSheet(_note_style())
         row.addWidget(lbl_range)
         row.addStretch()
         lay.addLayout(row)
 
         lbl_note = QLabel()
-        lbl_note.setStyleSheet('color: gray; font-size: 11px;')
+        lbl_note.setStyleSheet(_note_style())
 
         def _update_note(value):
             lbl_note.setText(
@@ -1326,6 +1413,22 @@ class WebODMPanel(QDialog):
         self._copc_worker.finished.connect(callback)
         self._copc_worker.start()
 
+    @staticmethod
+    def _pc_error_short(error):
+        if error == 'TIMEOUT':
+            return 'Point Cloud (timed out)'
+        if error == 'CANCELLED':
+            return 'Point Cloud (cancelled)'
+        return 'Point Cloud (conversion failed)'
+
+    @staticmethod
+    def _short_step_name(label):
+        """'Generating CHM' → 'CHM' のように、完了一覧向けの短い呼び名にする。"""
+        for prefix in ('Generating ', 'Rendering '):
+            if label.startswith(prefix):
+                return label[len(prefix):]
+        return label
+
     def _pc_error_message(self, error, timeout_min):
         if error == 'TIMEOUT':
             return (f'Point Cloud conversion timed out (exceeded {timeout_min} minutes). '
@@ -1358,7 +1461,7 @@ class WebODMPanel(QDialog):
         added = state['added']
         root = state['root']
         pc_layer = state.get('pc_layer')
-        lines = []
+        pc_short, pc_detail = '', ''
 
         if copc_path:
             pc_layer = QgsPointCloudLayer(copc_path, 'Point Cloud', 'copc')
@@ -1367,29 +1470,37 @@ class WebODMPanel(QDialog):
                 pc_layer.setCrs(crs)
         elif error:
             # 点群だけの失敗・中断では、生成済みのレイヤーは残す（点群は後から追加できる）
-            lines.append(self._pc_error_message(error, state.get('timeout_min', 10)))
+            pc_short = self._pc_error_short(error)
+            pc_detail = self._pc_error_message(error, state.get('timeout_min', 10))
 
         if pc_layer and pc_layer.isValid():
             self._add_to_group(pc_layer, group)
             added.append('Point Cloud')
 
+        # 2行目に並べる短い呼び名と、(details) で見せる理由（生成したレイヤー → 点群の順）
         errors = state.get('errors', [])
-        for label, reason in errors:
-            lines.append(f'Not created — {label}: {reason}')
+        not_created = [self._short_step_name(label) for label, _ in errors]
+        details = [f'{label}: {reason}' for label, reason in errors]
+        if pc_short:
+            not_created.append(pc_short)
+            details.append(pc_detail)
 
+        summary = ['Not created: ' + ', '.join(not_created)] if not_created else []
         if added:
             group.setExpanded(True)
             self._save_meta(state['out_dir'], state.get('generated_derivatives', set()))
             done_msg = 'Done: ' + ', '.join(added)
             if speed_str:
                 done_msg += f'  |  {speed_str}'
-            color = 'orange' if lines else 'green'
-            self._set_status(self._lbl_run_status, '\n'.join([done_msg] + lines), color)
+            self._set_status(self._lbl_run_status, '\n'.join([done_msg] + summary),
+                             'orange' if summary else 'green',
+                             details='\n\n'.join([done_msg] + details) if details else '')
             self._refresh_existing_combo()
         else:
             root.removeChildNode(group)
-            self._set_status(self._lbl_run_status, '\n'.join(['No layers added.'] + lines),
-                             'red' if lines else 'orange')
+            self._set_status(self._lbl_run_status, '\n'.join(['No layers added.'] + summary),
+                             'red' if summary else 'orange',
+                             details='\n\n'.join(details))
 
         self._set_running(False)
 
@@ -1399,7 +1510,7 @@ class WebODMPanel(QDialog):
         state = self._load_state
         group = state['group']
         added = state['added']
-        err_msg = ''
+        err_short, err_msg = '', ''
         if copc_path:
             crs = state.get('crs')
             pc_layer = QgsPointCloudLayer(copc_path, 'Point Cloud', 'copc')
@@ -1409,10 +1520,12 @@ class WebODMPanel(QDialog):
                 self._add_to_group(pc_layer, group)
                 added.append('Point Cloud')
         elif error:
+            err_short = 'Not added: ' + self._pc_error_short(error)
             err_msg = self._pc_error_message(error, state.get('timeout_min', 10))
-        self._finish_load_existing(group, added, pc_only=state.get('pc_only', False), error=err_msg)
+        self._finish_load_existing(group, added, pc_only=state.get('pc_only', False),
+                                   error=err_short, details=err_msg)
 
-    def _finish_load_existing(self, group, added, pc_only=False, error=''):
+    def _finish_load_existing(self, group, added, pc_only=False, error='', details=''):
         root = QgsProject.instance().layerTreeRoot()
         if pc_only:
             # 既存グループには手を付けない（点群が追加できなくても消さない）
@@ -1420,15 +1533,15 @@ class WebODMPanel(QDialog):
                 self._set_status(self._lbl_existing_status, 'Added: Point Cloud', 'green')
             else:
                 self._set_status(self._lbl_existing_status,
-                                 error or 'Point Cloud could not be loaded.', 'red')
+                                 error or 'Point Cloud could not be loaded.', 'red', details)
         elif added:
             group.setExpanded(True)
             text = 'Loaded: ' + ', '.join(added)
             self._set_status(self._lbl_existing_status, text + (f'\n{error}' if error else ''),
-                             'orange' if error else 'green')
+                             'orange' if error else 'green', details)
         else:
             root.removeChildNode(group)
             self._set_status(self._lbl_existing_status, error or 'No valid layers found.',
-                             'red' if error else 'orange')
+                             'red' if error else 'orange', details)
         self._set_running(False)
         self._lbl_run_status.setText('')

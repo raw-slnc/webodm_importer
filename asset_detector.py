@@ -55,39 +55,59 @@ def detect(folder: str) -> dict:
     # las_sources.json による相対パス参照（FOL VS Export形式）。
     # LAS本体はfolderにコピーされないため、.import_meta.jsonに保存された
     # 元ZIPのパスを起点に相対パスを解決する（Load Existingでの再検出用）。
+    # 1つでも欠けていれば点群として扱わない（一部だけの点群を作らないため）。
     if 'laz' not in found and 'ept' not in found:
-        las_paths = _resolve_las_sources(folder)
-        if las_paths:
+        las_paths, missing = fol_las_status(folder)
+        if las_paths and not missing:
             found['laz'] = las_paths
     return found
 
 
-def _resolve_las_sources(folder: str) -> list:
-    """folder内のlas_sources.jsonと.import_meta.jsonから、元ZIPの場所を
-    起点にLASの絶対パスを解決する。元ファイルが移動・削除済みの場合は
-    見つかったものだけを返す（無ければ空リスト）。"""
+def _las_source_paths(sources: dict, zip_dir: str) -> list:
+    """las_sources.json の各エントリを、元ZIPの場所を起点に絶対パスへ解決する。"""
+    las_paths = []
+    for entry in sources.get('las', []):
+        rel = entry.get('relative', '').replace('\\', '/')
+        las_paths.append(os.path.normpath(os.path.join(zip_dir, rel)))
+    return las_paths
+
+
+def fol_las_status(folder: str):
+    """取り込み済みフォルダの las_sources.json（FOL VS Export）が指す LAS について
+    (全パス, 見つからないパス) を返す。FOL由来でない・一覧が空なら ([], [])。
+    FOL は最新の Export 分の LAS しか残さないため、古いデータでは欠けることがある。"""
     sources_path = os.path.join(folder, 'las_sources.json')
     meta_path = os.path.join(folder, '.import_meta.json')
     if not os.path.isfile(sources_path) or not os.path.isfile(meta_path):
-        return []
+        return [], []
     import json
     try:
         with open(meta_path) as f:
             source = json.load(f).get('source', '')
         if not source:
-            return []
-        zip_dir = os.path.dirname(source)
+            return [], []
         with open(sources_path) as f:
             sources = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return []
-    las_paths = []
-    for entry in sources.get('las', []):
-        rel = entry.get('relative', '').replace('\\', '/')
-        abs_path = os.path.normpath(os.path.join(zip_dir, rel))
-        if os.path.isfile(abs_path):
-            las_paths.append(abs_path)
-    return las_paths
+        return [], []
+    las_paths = _las_source_paths(sources, os.path.dirname(source))
+    return las_paths, [p for p in las_paths if not os.path.isfile(p)]
+
+
+def fol_las_status_from_zip(zip_path: str):
+    """FOL VS Export の ZIP について (全パス, 見つからないパス) を返す。"""
+    import json
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            names = {n.replace('\\', '/'): n for n in zf.namelist()}
+            if 'las_sources.json' not in names:
+                return [], []
+            with zf.open(names['las_sources.json']) as f:
+                sources = json.load(f)
+    except (OSError, zipfile.BadZipFile, json.JSONDecodeError):
+        return [], []
+    las_paths = _las_source_paths(sources, os.path.dirname(zip_path))
+    return las_paths, [p for p in las_paths if not os.path.isfile(p)]
 
 
 def detect_from_zip(zip_path: str) -> dict:
@@ -109,20 +129,12 @@ def detect_from_zip(zip_path: str) -> dict:
             )
             if las_entries:
                 found['laz'] = las_entries
-        # las_sources.json による相対パス参照（FOL VS Export形式）
-        if 'laz' not in found and 'las_sources.json' in names:
-            import json
-            with zf.open('las_sources.json') as f:
-                sources = json.load(f)
-            zip_dir = os.path.dirname(zip_path)
-            las_paths = []
-            for entry in sources.get('las', []):
-                rel = entry.get('relative', '').replace('\\', '/')
-                abs_path = os.path.normpath(os.path.join(zip_dir, rel))
-                if os.path.isfile(abs_path):
-                    las_paths.append(abs_path)
-            if las_paths:
-                found['laz'] = las_paths
+    # las_sources.json による相対パス参照（FOL VS Export形式）。
+    # 1つでも欠けていれば点群として扱わない（一部だけの点群を作らないため）。
+    if 'laz' not in found:
+        las_paths, missing = fol_las_status_from_zip(zip_path)
+        if las_paths and not missing:
+            found['laz'] = las_paths
     return found
 
 
@@ -134,10 +146,6 @@ def detect_derived(folder: str) -> dict:
         if os.path.isfile(abs_path):
             found[key] = abs_path
     return found
-
-
-def can_generate_chm(assets: dict) -> bool:
-    return 'dsm' in assets and 'dtm' in assets
 
 
 def is_fol_source(source_path: str, is_zip: bool) -> bool:
