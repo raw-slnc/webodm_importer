@@ -14,6 +14,10 @@ A QGIS plugin that imports [WebODM](https://github.com/OpenDroneMap/WebODM) task
 - **Composite models**: Surface Model (DSM + hillshade) and Terrain Model (DTM + hillshade) baked into single RGB GeoTIFFs
 - **Duplicate detection**: MD5 hash check prevents re-importing the same ZIP twice
 - **Layer organisation**: All layers are grouped under the dataset name at the top of the layer tree
+- **Background processing**: QGIS stays usable while layers are generated; progress shows which layer is being created and how far it has got, and **Stop** takes effect without waiting for the current layer to finish
+- **Large datasets**: Orthophotos and elevation models are processed in parts, so memory use stays low
+- **Failure handling**: If one layer cannot be created, the others are still added, no broken file is left behind, and the reason is shown (see [Notes](#notes))
+- **Point cloud retry**: A point cloud that failed or timed out can be added later on its own, without importing everything again
 
 ## Output structure
 
@@ -125,20 +129,39 @@ Place the files in the structure above, then select the dataset folder via the *
 
 ## Usage
 
-1. Open the panel via **Raster → WebODM Importer**
+1. Open the window via **Raster → WebODM Importer**
 2. Click **Select ZIP** to select a WebODM task output ZIP
-3. Check the detected assets and select which layers to generate
-4. Set the output name (defaults to the ZIP filename)
-5. Click **Run**
+3. Check the detected assets and select which layers to generate in **Options**
+4. Click **Run**
 
-To reload a previously imported dataset, use the **Load Existing** dropdown.
+The dataset (layer group and output folder) is named after the ZIP file. While running, the line
+above the progress bar shows the current step (for example `3/9  Rendering Surface Model…`) and the
+bar shows its progress. When finished, the same area lists the added layers and any layer that could
+not be created, with the reason.
+
+**Surface model (DSM + hillshade)** and **Hillshade (terrain)** are independent:
+Surface model needs only a DSM and makes its own hillshade from it, while Hillshade (terrain)
+creates the DTM hillshade and the Terrain Model. Datasets without a DTM can still create a
+Surface Model.
+
+### Load Existing
+
+To reload a previously imported dataset, select it in the **Load Existing** dropdown and click
+**Load**. Datasets already in the layer tree cannot be selected, except when their point cloud is
+missing and can be added: then the button changes to **Add Point Cloud**, which adds only the point cloud to the
+existing group (for example after a conversion timed out).
 
 ## Notes
 
 - If the same ZIP (by content hash) has already been imported, re-import is blocked
 - Output folder name is auto-incremented (`_001`, `_002` …) if the name already exists
 - EPT and COPC point clouds load via built-in QGIS providers (no additional setup required)
-- LAS/LAZ files are converted to COPC automatically if `pdal` CLI is installed
+- LAS/LAZ files are converted to COPC if the `pdal` CLI is installed
+- When a layer cannot be created, the reason is shown in plain words where possible: not enough
+  memory, not enough free disk space in the output folder, or no write permission. Other errors are
+  shown as reported, with details in the QGIS message log (`webodm_importer`)
+- The plugin window is a separate window: it can be moved behind QGIS and switched with Alt+Tab,
+  and clicking the toolbar button brings it back to the front. Its size is fixed
 
 ## Colour rendering
 
@@ -184,13 +207,20 @@ but tilted surfaces, such as pitched roofs, can still be read as rough canopy.
 WebODM outputs EPT format (`entwine_pointcloud/ept.json`) by default when point cloud processing is enabled.
 EPT is supported by all QGIS environments and requires no additional setup.
 
-If the ZIP contains only LAS/LAZ files (no EPT), the plugin attempts to load them in the following order:
+If the ZIP contains only LAS/LAZ files (no EPT), they are converted to COPC format with the `pdal`
+CLI and then loaded. Several LAS files are merged into one point cloud. The converted file is kept in
+the dataset's `pc_cache/` folder and reused next time.
 
-1. Load directly via a built-in QGIS point cloud provider
-2. If that fails, convert to COPC format using the `pdal` CLI, then load
+Before converting, a dialog asks for a timeout (1–180 minutes, default 10). The timeout covers the
+whole conversion, including the merge of several files. Conversion progress cannot be shown as a
+percentage, so the elapsed time is shown instead.
 
-Installing the `pdal` CLI is recommended on Linux, where the QGIS PDAL provider may not be included in standard packages.
-If `pdal` is not installed and direct loading fails, the point cloud layer is silently skipped.
+If the conversion fails, times out or is stopped, the other layers are kept. Use
+**Load Existing → Add Point Cloud** to try again, for example with a longer timeout.
+
+Without the `pdal` CLI, LAS/LAZ point clouds cannot be converted and the Point cloud option is
+unavailable. Installing it is recommended on Linux, where the QGIS PDAL provider may not be included
+in standard packages.
 
 ## Support
 

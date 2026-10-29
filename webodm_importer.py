@@ -21,6 +21,7 @@ class WebODMImporter:
         self.iface.removeRasterToolBarIcon(self.action)
         self.iface.removePluginRasterMenu('WebODM Importer', self.action)
         if self.panel:
+            self.panel.shutdown_workers()
             self.panel.close()
             self.panel.deleteLater()
             self.panel = None
@@ -29,6 +30,7 @@ class WebODMImporter:
         if self.panel is None:
             self.panel = WebODMPanel(self.iface)
             self.panel.destroyed.connect(self._on_panel_destroyed)
+            self.panel.center_on_main_window()
         self.panel.show()
         self.panel.raise_()
         self.panel.activateWindow()

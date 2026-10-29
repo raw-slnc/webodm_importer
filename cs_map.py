@@ -13,6 +13,8 @@ FOL's scipy-based output.
 import numpy as np
 from osgeo import gdal, osr
 
+from . import processor
+
 # DTM finer than this (m) is resampled to _RESAMPLE_TARGET before processing
 # (same thresholds as FOL's CS Map Export).
 _RESAMPLE_THRESHOLD = 0.1
@@ -163,13 +165,18 @@ def _smooth_range(data, edge0, edge1):
     return (t * t * (3.0 - 2.0 * t)).astype(np.float32)
 
 
-def compute_cs_map(dem, cell_size):
-    """DEM(NaN=nodata)から CS 立体図の RGBA (rows, cols, 4) uint8 を作る。"""
+def compute_cs_map(dem, cell_size, progress=None):
+    """DEM(NaN=nodata)から CS 立体図の RGBA (rows, cols, 4) uint8 を作る。
+    progress(fraction) は段階ごとに呼ばれる（0〜1）。"""
+    def _p(fraction):
+        processor.report(progress, fraction)
+
     p = _PRESET
     smooth_dem = _smooth_nan(dem, p["smooth_sigma_px"])
     slope = _slope_deg(smooth_dem, cell_size)
     curv = _curvature(smooth_dem, cell_size)
     valid = np.isfinite(dem) & np.isfinite(slope) & np.isfinite(curv)
+    _p(0.15)
 
     slope_u = _robust_unit(slope, *p["slope_percentiles"])
     elev_u = _robust_unit(smooth_dem, *p["elevation_percentiles"])
@@ -186,12 +193,15 @@ def compute_cs_map(dem, cell_size):
     valley = np.clip(-curv_s, 0.0, 1.0)
     ridge_mask = _smooth_nan(ridge, p["color_mask_sigma_px"])
     valley_mask = _smooth_nan(valley, p["valley_spread_sigma_px"])
+    _p(0.3)
     valley_color_mask = valley_mask * (1.0 - p["valley_ridge_fade"] * np.clip(ridge_mask, 0.0, 1.0))
     depth_surface = _smooth_nan(smooth_dem, p["valley_depth_sigma_px"])
+    _p(0.5)
     local_depth = np.clip(depth_surface - smooth_dem, 0.0, None)
     depth_u = _robust_unit(local_depth, *p["valley_depth_percentiles"])
     depth_u = np.power(depth_u, p["valley_depth_gamma"])
     depth_spread = np.clip(_smooth_nan(depth_u, p["valley_depth_spread_sigma_px"]), 0.0, 1.0)
+    _p(0.65)
     depth_area = np.clip(0.30 * depth_u + 0.70 * depth_spread, 0.0, 1.0)
     depth_gate = (
         p["valley_depth_floor"]
@@ -212,6 +222,7 @@ def compute_cs_map(dem, cell_size):
     ridge_t = np.power(np.clip(ridge_mask, 0.0, 1.0), p["ridge_gamma"])
     valley_t = np.power(np.clip(valley_color_mask, 0.0, 1.0), p["valley_gamma"])
 
+    _p(0.75)
     gray_base, gray_scale = p["elevation_gray"]
     gray = (gray_base + gray_scale * elev_u).astype(np.float32)
     rgb = np.stack([gray, gray, gray], axis=-1)
@@ -262,18 +273,25 @@ def compute_cs_map(dem, cell_size):
     return rgba
 
 
-def _read_dtm(dtm_path):
+def _read_dtm(dtm_path, progress=None):
     """DTMを読み込み (data[NaN=nodata], geotransform, projection) を返す。
     0.1m未満の解像度は 0.5m へ平均値で縮小する。"""
-    ds = gdal.Open(dtm_path)
+    ds = processor.open_raster(dtm_path)
     gt = ds.GetGeoTransform()
     srs = osr.SpatialReference(wkt=ds.GetProjection())
     if srs.IsGeographic():
         ds = None
         raise ValueError('CS Map requires a projected CRS (metres).')
     if abs(gt[1]) < _RESAMPLE_THRESHOLD:
-        ds = gdal.Warp('', ds, format='MEM', xRes=_RESAMPLE_TARGET, yRes=_RESAMPLE_TARGET,
-                       resampleAlg='average')
+        cb, state = processor.gdal_callback(progress)
+        gdal.ErrorReset()
+        warped = gdal.Warp('', ds, format='MEM', xRes=_RESAMPLE_TARGET, yRes=_RESAMPLE_TARGET,
+                           resampleAlg='average', callback=cb)
+        if state['cancelled']:
+            raise processor.Cancelled()
+        if warped is None:
+            raise RuntimeError(gdal.GetLastErrorMsg() or 'Resampling the DTM failed')
+        ds = warped
         gt = ds.GetGeoTransform()
     band = ds.GetRasterBand(1)
     data = band.ReadAsArray().astype(np.float32)
@@ -286,20 +304,20 @@ def _read_dtm(dtm_path):
     return data, gt, proj
 
 
-def generate_cs_map(dtm_path: str, output_path: str) -> str:
+def generate_cs_map(dtm_path: str, output_path: str, progress=None) -> str:
     """DTMから CS 立体図の RGBA GeoTIFF を作る（データ外はアルファ0で透明）。"""
-    dem, gt, proj = _read_dtm(dtm_path)
-    rgba = compute_cs_map(dem, abs(gt[1]))
+    dem, gt, proj = _read_dtm(
+        dtm_path, progress=(lambda f: processor.report(progress, 0.2 * f)) if progress else None)
+    rgba = compute_cs_map(
+        dem, abs(gt[1]),
+        progress=(lambda f: processor.report(progress, 0.2 + 0.7 * f)) if progress else None)
     rows, cols = dem.shape
-    driver = gdal.GetDriverByName('GTiff')
-    ds_out = driver.Create(output_path, cols, rows, 4, gdal.GDT_Byte,
-                           options=['COMPRESS=LZW', 'TILED=YES', 'PHOTOMETRIC=RGB', 'ALPHA=YES'])
-    ds_out.SetGeoTransform(gt)
-    ds_out.SetProjection(proj)
+    ds_out = processor.create_raster(output_path, cols, rows, 4, gdal.GDT_Byte, gt, proj,
+                                     options=['COMPRESS=LZW', 'TILED=YES', 'PHOTOMETRIC=RGB', 'ALPHA=YES'])
     interp = [gdal.GCI_RedBand, gdal.GCI_GreenBand, gdal.GCI_BlueBand, gdal.GCI_AlphaBand]
     for i in range(4):
         band = ds_out.GetRasterBand(i + 1)
-        band.WriteArray(rgba[:, :, i])
+        processor.write_block(band, rgba[:, :, i], 0)
         band.SetColorInterpretation(interp[i])
     ds_out.SetMetadataItem(
         'METHOD_ATTRIBUTION',
@@ -307,6 +325,6 @@ def generate_cs_map(dtm_path: str, output_path: str) -> str:
     ds_out.SetMetadataItem(
         'DATA_NOTE',
         'Photogrammetric (WebODM) DTM has low ground-surface accuracy, especially under canopy.')
-    ds_out.FlushCache()
-    ds_out = None
+    processor.close_raster(ds_out)
+    processor.report(progress, 1.0)
     return output_path
