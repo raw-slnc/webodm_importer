@@ -619,7 +619,7 @@ class WebODMPanel(QDialog):
         meta = {'source': self._source_path, 'hash': self._source_hash()}
         if generated_derivatives is not None:
             meta['generated_derivatives'] = sorted(generated_derivatives)
-        with open(os.path.join(out_dir, '.import_meta.json'), 'w') as f:
+        with open(os.path.join(out_dir, '.import_meta.json'), 'w', encoding='utf-8') as f:
             json.dump(meta, f)
 
     def _load_meta(self, folder: str) -> dict:
@@ -627,7 +627,7 @@ class WebODMPanel(QDialog):
         if not os.path.isfile(meta_path):
             return {}
         try:
-            with open(meta_path) as f:
+            with open(meta_path, encoding='utf-8') as f:
                 return json.load(f)
         except (OSError, json.JSONDecodeError):
             return {}

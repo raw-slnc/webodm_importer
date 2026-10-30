@@ -82,11 +82,11 @@ def fol_las_status(folder: str):
         return [], []
     import json
     try:
-        with open(meta_path) as f:
+        with open(meta_path, encoding='utf-8') as f:
             source = json.load(f).get('source', '')
         if not source:
             return [], []
-        with open(sources_path) as f:
+        with open(sources_path, encoding='utf-8') as f:
             sources = json.load(f)
     except (OSError, json.JSONDecodeError):
         return [], []
