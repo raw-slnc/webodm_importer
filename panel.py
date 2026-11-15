@@ -17,10 +17,10 @@ from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QWidget,
     QLabel, QLineEdit, QPushButton, QCheckBox, QFileDialog,
     QComboBox, QGroupBox, QProgressBar, QSpinBox, QMessageBox,
-    QApplication, QScrollArea, QFrame, QStyle,
+    QApplication, QScrollArea, QFrame, QStyle, QSizePolicy,
 )
-from qgis.PyQt.QtCore import Qt, QThread, QTimer, pyqtSignal, QEventLoop, QEvent
-from qgis.PyQt.QtGui import QIcon, QGuiApplication, QFont, QFontMetrics
+from qgis.PyQt.QtCore import Qt, QThread, QTimer, pyqtSignal, QEventLoop, QEvent, QProcess, QDir, QUrl
+from qgis.PyQt.QtGui import QIcon, QGuiApplication, QFont, QFontMetrics, QDesktopServices
 import time
 from qgis.core import QgsPointCloudLayer, QgsRasterLayer, QgsProject, QgsMessageLog, Qgis
 
@@ -209,11 +209,38 @@ class _CopcWorker(QThread):
         _fail(_last_error)
 
 from . import asset_detector, processor
+from .ui_fonts import PLUGIN_PT, plugin_font, use_plugin_font
 from .derivative_worker import DerivativeWorker, LAYERS, REPORT_NAMES
 
 
 def _pdal_available() -> bool:
     return shutil.which('pdal') is not None
+
+
+def _show_in_file_manager(path):
+    """ファイルマネージャーを開き、path を選んだ状態にする。できなければ False
+    （quick_landscape_analysis_explorer と同じ方法）。"""
+    path = os.path.abspath(path)
+    if sys.platform.startswith('win'):
+        # "/select," とパスは別の引数にする
+        return QProcess.startDetached('explorer.exe', ['/select,', QDir.toNativeSeparators(path)])
+    if sys.platform == 'darwin':
+        return QProcess.startDetached('open', ['-R', path])
+    # Linux など：freedesktop の FileManager1（D-Bus）。Nemo・Nautilus・Dolphin・Caja など
+    uri = QUrl.fromLocalFile(path).toString(QUrl.ComponentFormattingOption.FullyEncoded)
+    process = QProcess()
+    process.start('dbus-send', [
+        '--session', '--print-reply',
+        '--dest=org.freedesktop.FileManager1', '--type=method_call',
+        '/org/freedesktop/FileManager1', 'org.freedesktop.FileManager1.ShowItems',
+        f'array:string:{uri}', 'string:',
+    ])
+    if not process.waitForStarted(2000):
+        return False
+    if not process.waitForFinished(5000):
+        # ファイルマネージャーの起動中かもしれない。二つ目の窓は開かない
+        return True
+    return process.exitStatus() == QProcess.ExitStatus.NormalExit and process.exitCode() == 0
 
 
 class _AutoRefreshCombo(QComboBox):
@@ -331,16 +358,13 @@ _FOL_LAS_MISSING_MSG = (
 )
 
 
-# 注記・ステータスの文字は、QGIS の文字の大きさに対する割合で決める（固定の px にしない）。
-# QGIS のフォント設定や表示倍率を変えても、本文との大小関係を保ったまま連動する。
+# 注記・ステータスの文字は、プラグインの文字の大きさ（ui_fonts.PLUGIN_PT）の9割。
+# QGIS のフォント設定には連動しない（窓の大きさが変わらないように）。表示倍率は効く。
 _NOTE_FONT_RATIO = 0.9
 
 
 def _note_font_css():
-    font = QApplication.font()
-    if font.pointSizeF() > 0:
-        return f'font-size: {font.pointSizeF() * _NOTE_FONT_RATIO:.1f}pt;'
-    return f'font-size: {max(1, round(font.pixelSize() * _NOTE_FONT_RATIO))}px;'
+    return f'font-size: {PLUGIN_PT * _NOTE_FONT_RATIO:.1f}pt;'
 
 
 def _note_style(color='gray'):
@@ -349,13 +373,10 @@ def _note_style(color='gray'):
 
 def _options_css():
     """Options のチェックボックス：文字は注記と同じ割合、チェックの四角も文字に合わせる。"""
-    base = QFont(QApplication.font())
+    base = plugin_font()
     font = QFont(base)
-    if font.pointSizeF() > 0:
-        font.setPointSizeF(font.pointSizeF() * _NOTE_FONT_RATIO)
-    else:
-        font.setPixelSize(max(1, round(font.pixelSize() * _NOTE_FONT_RATIO)))
-    # QGIS が本来描く四角の大きさを、文字が小さくなる割合だけ縮める
+    font.setPointSizeF(PLUGIN_PT * _NOTE_FONT_RATIO)
+    # 本来描く四角の大きさを、文字が小さくなる割合だけ縮める
     native = QApplication.style().pixelMetric(QStyle.PixelMetric.PM_IndicatorWidth)
     scale = QFontMetrics(font).height() / max(1, QFontMetrics(base).height())
     box = max(8, round(native * scale))
@@ -383,6 +404,8 @@ class WebODMPanel(QDialog):
         self.setWindowTitle('WebODM Importer')
         # タイトルバー・タスクバー・Alt+Tab の切替画面に出るアイコン
         self.setWindowIcon(QIcon(os.path.join(os.path.dirname(__file__), 'icon.png')))
+        # QGIS のフォントサイズ設定に関係なく一つの大きさで表示する（ui_fonts）
+        use_plugin_font(self)
         self.iface = iface
         self._source_path = None
         self._is_zip = False
@@ -414,7 +437,7 @@ class WebODMPanel(QDialog):
         self._src_edit.setReadOnly(True)
         btn_src = QPushButton('Select ZIP')
         btn_src.setFixedWidth(90)
-        self._control_row_height = max(self._src_edit.sizeHint().height(), btn_src.sizeHint().height())
+        self._control_row_height = self._measure_control_row_height()
         btn_src.clicked.connect(self._select_source)
         row_src.addWidget(self._src_edit)
         row_src.addWidget(btn_src)
@@ -543,6 +566,17 @@ class WebODMPanel(QDialog):
         self._btn_load.setFixedHeight(self._control_row_height)
         self._btn_load.clicked.connect(self._load_existing)
         row_existing.addWidget(self._btn_load)
+        # データフォルダを開く（コンボで選んでいれば、そのフォルダを選んだ状態で）
+        self._btn_open_folder = QPushButton('Open Folder')
+        # 文字が大きい環境でも切れないよう、幅は文字に合わせる（最小 110、余りはコンボへ）
+        self._btn_open_folder.setMinimumWidth(110)
+        self._btn_open_folder.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._btn_open_folder.setFixedHeight(self._control_row_height)
+        self._btn_open_folder.setToolTip(
+            'Open the webodm_importer_data folder of this project.\n'
+            'When a dataset is selected, its folder is selected in the file manager.')
+        self._btn_open_folder.clicked.connect(self._open_data_folder)
+        row_existing.addWidget(self._btn_open_folder)
         lay.addLayout(row_existing)
         self._lbl_existing_status = _StatusLabel(lines=2)
         self._lbl_existing_status.setStyleSheet(_note_style())
@@ -553,15 +587,11 @@ class WebODMPanel(QDialog):
         grp = QGroupBox('Run')
         lay = QVBoxLayout(grp)
 
-        # ステータス（実行中は処理内容と％、終了後は結果）
+        # 処理内容の行（実行中は処理内容と％。終了後の結果は進捗バーの下の行）
         self._lbl_progress_step = QLabel()
         self._lbl_progress_step.setStyleSheet(_note_font_css())
         # 処理内容の行は常に置いておく（待機中は空）。高さは _fix_line_heights で固定する。
         lay.addWidget(self._lbl_progress_step)
-
-        self._lbl_run_status = _StatusLabel(lines=2)
-        self._lbl_run_status.setStyleSheet(_note_font_css())
-        lay.addWidget(self._lbl_run_status)
 
         # 進捗バー｜Run/Stop
         row_run = QHBoxLayout()
@@ -582,6 +612,11 @@ class WebODMPanel(QDialog):
         self._btn_stop.clicked.connect(self._cancel)
         row_run.addWidget(self._btn_stop)
         lay.addLayout(row_run)
+
+        # 結果（進捗バーの下。処理内容の行は上）
+        self._lbl_run_status = _StatusLabel(lines=2)
+        self._lbl_run_status.setStyleSheet(_note_font_css())
+        lay.addWidget(self._lbl_run_status)
         main.addWidget(grp)
 
         lbl_credit = QLabel('Developed by Avid Tree Work')
@@ -599,6 +634,8 @@ class WebODMPanel(QDialog):
         # 変わったときだけ計算し直す（_on_environment_changed）。
         self._refreshing_metrics = False
         self._watched_screen = None
+        # 測る前に窓全体を仕上げる（仕上げ前の部品は QGIS の文字の大きさのまま）
+        self.ensurePolished()
         self._fix_line_heights()
         self._update_window_size()
 
@@ -826,8 +863,31 @@ class WebODMPanel(QDialog):
                              'The LAS files for this dataset are no longer available, so its '
                              'point cloud cannot be created.', 'orange', _FOL_LAS_MISSING_MSG)
 
+    def _open_data_folder(self):
+        """データフォルダを開く。コンボで選んでいれば、そのフォルダを選んだ状態にする
+        （できない環境ではデータフォルダを開くだけ）。"""
+        base = self._output_base()
+        if not base or not os.path.isdir(base):
+            # 窓を開いたままプロジェクトを替えたときなど、押した時点で無い場合
+            self._set_status(self._lbl_existing_status,
+                             'Save the project first.' if not base else 'No imported data yet.',
+                             'orange')
+            self._update_open_folder_button()
+            return
+        selected = self._combo_existing.currentText()
+        folder = os.path.join(base, selected)
+        if selected != '— select —' and os.path.isdir(folder):
+            if _show_in_file_manager(folder):
+                return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(base))
+
+    def _update_open_folder_button(self):
+        base = self._output_base()
+        self._btn_open_folder.setEnabled(bool(base) and os.path.isdir(base))
+
     def _update_load_button(self):
         """Load Existing のボタン：読み込み済みで点群だけ欠けていれば Add Point Cloud。"""
+        self._update_open_folder_button()
         self._btn_load.setText('Load')
         self._btn_load.setEnabled(not getattr(self, '_running', False))
         selected = self._combo_existing.currentText()
@@ -868,15 +928,17 @@ class WebODMPanel(QDialog):
                 heights.append(lbl.sizeHint().height())
             lbl.setText(text)
             lbl.setFixedHeight(max(heights))
-        # 処理内容の行：空だと 1px 低くなるため、文字があるときの高さで固定する
-        step = self._lbl_progress_step
-        text = step.text()
-        step.setMinimumHeight(0)
-        step.setMaximumHeight(16777215)
-        step.setText('0/0')
-        step.ensurePolished()
-        step.setFixedHeight(step.sizeHint().height())
-        step.setText(text)
+        # 処理内容の行と、Source の検出数の行：空だと 1px 低くなるため、文字があるときの
+        # 高さで固定する（開いたときは空なので、固定しないと ZIP を選んだ後に中身が窓より
+        # 1px 高くなり、スクロールバーが出る）
+        for line in (self._lbl_progress_step, self._lbl_source_status):
+            text = line.text()
+            line.setMinimumHeight(0)
+            line.setMaximumHeight(16777215)
+            line.setText('0/0')
+            line.ensurePolished()
+            line.setFixedHeight(line.sizeHint().height())
+            line.setText(text)
 
     def _target_screen(self):
         if self.isVisible() and self.screen() is not None:
@@ -921,17 +983,26 @@ class WebODMPanel(QDialog):
             if (x, y) != (frame.left(), frame.top()):
                 self.move(x, y)
 
+    def _measure_control_row_height(self):
+        """入力欄・ボタンの行の高さ。窓の子として作った部品で測る（窓の外の部品は
+        プラグインの文字の大きさでなく QGIS の設定の大きさになるため）。"""
+        edit = QLineEdit(self)
+        button = QPushButton('Select ZIP', self)
+        try:
+            edit.ensurePolished()
+            button.ensurePolished()
+            return max(edit.sizeHint().height(), button.sizeHint().height())
+        finally:
+            edit.deleteLater()
+            button.deleteLater()
+
     def _on_environment_changed(self, *_args):
-        """フォント・表示倍率・画面が変わったとき：文字の大きさと確保する高さを計算し直す。"""
+        """表示倍率・画面が変わったとき：確保する高さと窓の大きさを計算し直す。
+        文字の大きさはプラグインで決めているので、QGIS のフォント設定には連動しない。"""
         if self._refreshing_metrics:
             return
         self._refreshing_metrics = True
         try:
-            css = _note_font_css()
-            for widget in [self] + self.findChildren(QWidget):
-                style = widget.styleSheet()
-                if 'font-size' in style:
-                    widget.setStyleSheet(re.sub(r'font-size:[^;]*;', css, style))
             self._options_group.setStyleSheet(_options_css())
             self._fix_line_heights()
             self._update_window_size()
@@ -958,6 +1029,8 @@ class WebODMPanel(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
+        # 閉じている間にプロジェクトが替わっていることがある
+        self._update_open_folder_button()
         handle = self.windowHandle()
         if handle is not None and not getattr(self, '_screen_hooked', False):
             handle.screenChanged.connect(self._on_screen_changed)
@@ -967,10 +1040,15 @@ class WebODMPanel(QDialog):
             QTimer.singleShot(0, self._update_window_size)
 
     def event(self, event):
-        # QGIS の設定でアプリ全体のフォントが変わったとき
+        # QGIS の設定でアプリ全体のフォントが変わったとき：書体だけ合わせる（大きさは
+        # プラグインの大きさのまま）
         if event.type() == QEvent.Type.ApplicationFontChange:
-            QTimer.singleShot(0, self._on_environment_changed)
+            QTimer.singleShot(0, self._on_app_font_changed)
         return super().event(event)
+
+    def _on_app_font_changed(self):
+        use_plugin_font(self)
+        self._on_environment_changed()
 
     def center_on_main_window(self):
         """QGIS のメイン画面の中央に置く（初回表示用）。"""

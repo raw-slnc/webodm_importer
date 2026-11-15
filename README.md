@@ -206,7 +206,7 @@ but tilted surfaces, such as pitched roofs, can still be read as rough canopy.
 
 ## Requirements
 
-- QGIS 4.0 or later
+- QGIS 3.44 or later (including QGIS 4.x)
 - WebODM task output ZIP
 
 ### Point Cloud
